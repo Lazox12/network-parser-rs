@@ -7,7 +7,6 @@ use proc_macro2::Ident;
 use proc_macro_warning::Warning;
 use quote::quote;
 use syn::{Expr, ExprClosure};
-use crate::Row::Field;
 /*
 syntax:
 
