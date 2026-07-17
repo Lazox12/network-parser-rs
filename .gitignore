@@ -1,3 +1,5 @@
 /target
 /.idea
 network_parser_rs_macro/target
+Cargo.lock
+network_parser_rs_macro/Cargo.lock
