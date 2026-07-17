@@ -1,3 +1,6 @@
+[workspace]
+members = ["network_parser_rs_macro"]
+
 [package]
 name = "network_parser_rs"
 version = "0.1.0"
