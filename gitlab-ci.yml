@@ -1,26 +1,45 @@
 stages:
-  - build
+  - test
   - publish
 
-rust-latest:
-  stage: build
-  image: rust:latest
-  script:
-    - cargo build --verbose
-    - cargo test --verbose
+test:
+  rust-latest:
+    stage: build
+    image: rust:latest
+    script:
+      - cargo build --verbose
+      - cargo test --verbose
 
 publish:
-  image: rust:1.91.0-alpine
-  environment: release
-  only:
-    - tags  # Only run on tag pushes
-  id_tokens:
-    CRATES_IO_ID_TOKEN:
-      aud: crates.io
-  before_script:
-    - apk add --no-cache bash curl jq
+  stage: publish
+  image: rust:latest
+  rules:
+    # Trigger this job automatically ONLY when a git tag is pushed
+    - if: $CI_COMMIT_TAG
   script:
-    # Exchange OIDC token for publish token
-    - CARGO_REGISTRY_TOKEN=$(bash exchange-token.sh)
-    # Publish to crates.io
-    - CARGO_REGISTRY_TOKEN="$CARGO_REGISTRY_TOKEN" cargo publish
+    # 1. Get the version from the Git tag.
+    # The '#v' strips the 'v' prefix if you tag as 'v1.2.3' instead of '1.2.3'
+    - VERSION=${CI_COMMIT_TAG#v}
+    - echo "Preparing to publish version $VERSION"
+
+    # 2. Install cargo-binstall and cargo-edit to get 'cargo set-version' fast
+    - wget -O - https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-unknown-linux-musl.tgz | tar -xz -C /usr/local/cargo/bin
+    - cargo binstall cargo-edit -y
+
+    # 3. Set the version for both crates.
+    # Replace 'my_crate_macros' and 'my_crate' with your actual crate names.
+    - cargo set-version -p my_crate_macros $VERSION
+    - cargo set-version -p my_crate $VERSION
+
+    # 4. Authenticate with crates.io
+    - cargo login ${CARGO_REGISTRY_TOKEN}
+
+    # 5. Publish the proc-macro crate first.
+    # --allow-dirty is REQUIRED because we modified Cargo.toml without committing.
+    - cargo publish -p my_crate_macros --allow-dirty
+
+    # 6. Wait for crates.io to update its registry index
+    - sleep 15
+
+    # 7. Publish the main wrapper crate
+    - cargo publish -p my_crate --allow-dirty
