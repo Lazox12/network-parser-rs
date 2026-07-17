@@ -2,6 +2,8 @@
 name = "network_parser_rs"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "an package that enables easy parsing of networks structs just by defining them"
 
 [dependencies]
 network_parser_rs_macro= {version="0.0.1",path= "network_parser_rs_macro" }
