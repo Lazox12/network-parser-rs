@@ -2,7 +2,7 @@ use network_parser_rs::make_struct;
 #[test]
 #[allow(unused)]
 pub fn exec(){
-    make_struct! { MyStruct,
+    make_struct! { MyStruct   ,
         field1: u3,
         consume(5) //skips 5 bytes
         /*field2: u5,

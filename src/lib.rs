@@ -1,88 +1,113 @@
-mod utils;
-
-#[allow(dead_code)] //todo
-use proc_macro::TokenStream;
-use std::str::FromStr;
-use proc_macro2::Ident;
-use proc_macro_warning::Warning;
-use quote::quote;
-use syn::{Expr, ExprClosure};
-/*
-syntax:
 
 
-make_struct! { MyStruct,
-    field1: u3,
-    consume(5) //skips 5 bytes
-    field2: u5,
-    field3: Vec<u8>;field1, // vec of size defined in field1
-    field4: CStr,
-    if peek(u8)==15{
-        field5: u16,
-        //field 5 will be defined as Option<u16> filled only when the next two bytes are 15
-    }
-    field6: [u8;4],
-}
-*/
+pub trait NetworkParse: TryFrom<Vec<u8>> + From<*mut u8> + Into<Vec<u8>> {}
 
-enum Type{
-    UInt(u8),
-    Int(u8),
-    Vec(Option<Ident>), //identifier of the size field
-    CStr(Option<Ident>),
-    Slice(u8),
-    Optional(OptionType), // field defined behind if condition
-}
-struct OptionType{
-    pub ty: Box<Vec<Type>>, // vec is here because multiple types can be defined behind the if condition
-    pub condition: TokenStream
-}
+pub use network_parser_rs_macro::make_struct;
 
-enum Row {
-    Consume(Expr),
-    Field(Field),
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-}
-struct Field{
-    identifier:Ident,
-    ty:Type,
-}
-struct SyntaxTree{
-    pub inner:Vec<Row>,
-    pub test:String
-}
-impl From<TokenStream> for SyntaxTree{
-    fn from(value: TokenStream) -> Self {
-        let val_str = value.to_string();
-
-        let rows = val_str.split(",");
-        let mut tree:SyntaxTree;
-
-        for row in rows{
-            let row = row.trim();
-            match row {
-                s if s.starts_with("consume(")  => {
-                    let ind = utils::find_closing_parrent('(',String::from(s));
-
-                    tree.inner.push(Row::Consume(syn::parse_str(&s[8..ind]).unwrap()))
-
-                }
-                _ => {}
-            }
+    make_struct! { TestStruct,
+        field1: u3,
+        consume(5) // skips 5 bits (completes the first byte)
+        field2: u5,
+        consume(3) // padding to align Vec<u8> to byte boundary
+        field3: Vec<u8>;field2, // vec of size defined in field2
+        field4: CStr,
+        if field1 == 7 {
+            field5: u16,
+            field6: [u8; 4],
         }
-
-        SyntaxTree{inner:Vec::new(),test:val_str}
-
+        field7: i12, // 12-bit signed
     }
-}
-#[proc_macro]
-pub fn make_struct(input: TokenStream) -> TokenStream {
-    let parsed: SyntaxTree = input.into();
-    let test_content = parsed.test;
 
-    let expanded = quote! {
-        println!("{}", #test_content);
-    };
+    #[test]
+    fn test_struct_fields_exist() {
+        // This test ensures the struct is generated with the correct fields.
+        let instance = TestStruct {
+            field1: 7,
+            field2: 3,
+            field3: vec![1, 2, 3],
+            field4: std::ffi::CString::new("test").unwrap(),
+            field5: Some(1024),
+            field6: Some([10, 20, 30, 40]),
+            field7: -500,
+        };
+        
+        assert_eq!(instance.field1, 7);
+    }
 
-    TokenStream::from(expanded)
+    #[test]
+    fn test_try_from_vec() {
+        let data: Vec<u8> = vec![
+            0b1110_0000, // byte 0: field1 = 7 (u3) = 111, consume(5) = 00000
+            0b0001_1000, // byte 1: field2 = 3 (u5) = 00011, consume(3) = 000
+            0x01, 0x02, 0x03, // byte 2-4: field3 (Vec<u8> of length field2 = 3)
+            b't', b'e', b's', b't', 0x00, // byte 5-9: field4 (CStr)
+            0x04, 0x00, // byte 10-11: field5 (u16) = 1024 (0x0400)
+            10, 20, 30, 40, // byte 12-15: field6 ([u8; 4])
+            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100
+        ];
+        
+        let parsed = TestStruct::try_from(data).unwrap();
+        assert_eq!(parsed.field1, 7);
+        assert_eq!(parsed.field2, 3);
+        assert_eq!(parsed.field3, vec![1, 2, 3]);
+        assert_eq!(parsed.field4, std::ffi::CString::new("test").unwrap());
+        assert_eq!(parsed.field5, Some(1024));
+        assert_eq!(parsed.field6, Some([10, 20, 30, 40]));
+        assert_eq!(parsed.field7, -500);
+    }
+    
+    #[test]
+    fn test_from_ptr() {
+        let mut data: Vec<u8> = vec![
+            0b1110_0000, // byte 0: field1 = 7 (u3) = 111, consume(5) = 00000
+            0b0001_1000, // byte 1: field2 = 3 (u5) = 00011, consume(3) = 000
+            0x01, 0x02, 0x03, // byte 2-4: field3 (Vec<u8> of length field2 = 3)
+            b't', b'e', b's', b't', 0x00, // byte 5-9: field4 (CStr)
+            0x04, 0x00, // byte 10-11: field5 (u16) = 1024 (0x0400)
+            10, 20, 30, 40, // byte 12-15: field6 ([u8; 4])
+            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100
+        ];
+        
+        let ptr = data.as_mut_ptr();
+        let parsed = TestStruct::from(ptr);
+        
+        assert_eq!(parsed.field1, 7);
+        assert_eq!(parsed.field2, 3);
+        assert_eq!(parsed.field3, vec![1, 2, 3]);
+        assert_eq!(parsed.field4, std::ffi::CString::new("test").unwrap());
+        assert_eq!(parsed.field5, Some(1024));
+        assert_eq!(parsed.field6, Some([10, 20, 30, 40]));
+        assert_eq!(parsed.field7, -500);
+    }
+
+    #[test]
+    fn test_into_vec() {
+        let instance = TestStruct {
+            field1: 7,
+            field2: 3,
+            field3: vec![1, 2, 3],
+            field4: std::ffi::CString::new("test").unwrap(),
+            field5: Some(1024),
+            field6: Some([10, 20, 30, 40]),
+            field7: -500,
+        };
+        
+        let data: Vec<u8> = instance.into();
+        
+        let expected_data: Vec<u8> = vec![
+            0b1110_0000, // byte 0: field1 = 7 (u3) = 111, consume(5) = 00000
+            0b0001_1000, // byte 1: field2 = 3 (u5) = 00011, consume(3) = 000
+            0x01, 0x02, 0x03, // byte 2-4: field3 (Vec<u8> of length field2 = 3)
+            b't', b'e', b's', b't', 0x00, // byte 5-9: field4 (CStr)
+            0x04, 0x00, // byte 10-11: field5 (u16) = 1024 (0x0400)
+            10, 20, 30, 40, // byte 12-15: field6 ([u8; 4])
+            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100
+        ];
+        
+        assert_eq!(data, expected_data);
+    }
 }

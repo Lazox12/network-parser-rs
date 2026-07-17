@@ -1,6 +1,4 @@
-
-
-pub fn find_closing_parrent(parrent:char,str:String)->usize{
+/*pub fn find_closing_parrent(parrent:char, str:String) ->usize{
     let opposite_parrent=match parrent{
         '('=>')',
         '['=>']',
@@ -23,9 +21,11 @@ pub fn find_closing_parrent(parrent:char,str:String)->usize{
     }
     return 0;
 
-}
+}*/
 
 #[test]
 pub fn test_find_closing_parrent(){
     assert_eq!(find_closing_parrent('(',String::from("fresfwadaw(freshgsrkjfe(fesagsruih)({[}dwa}daw>dvgtg<>])efsgtdb)hdf")),63);
 }
+
+
