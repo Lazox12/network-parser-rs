@@ -8,6 +8,7 @@ description = "a procedural macro for network_parser_rs package"
 [lib]
 proc-macro = true
 
+
 [dependencies]
 proc-macro2 = "1.0.106"
 quote = "1.0.46"

@@ -1,4 +1,7 @@
-
+#![cfg_attr(not(feature="std"), no_std)]
+use core::convert::{TryFrom, From, Into};
+extern crate alloc;
+use alloc::vec::Vec;
 
 pub trait NetworkParse: TryFrom<Vec<u8>> + From<*mut u8> + Into<Vec<u8>> {}
 
@@ -6,6 +9,7 @@ pub use network_parser_rs_macro::make_struct;
 
 #[cfg(test)]
 mod tests {
+    use alloc::ffi::CString;
     use super::*;
 
     make_struct! { TestStruct,
@@ -29,7 +33,7 @@ mod tests {
             field1: 7,
             field2: 3,
             field3: vec![1, 2, 3],
-            field4: std::ffi::CString::new("test").unwrap(),
+            field4: CString::new("test").unwrap(),
             field5: Some(1024),
             field6: Some([10, 20, 30, 40]),
             field7: -500,
@@ -54,7 +58,7 @@ mod tests {
         assert_eq!(parsed.field1, 7);
         assert_eq!(parsed.field2, 3);
         assert_eq!(parsed.field3, vec![1, 2, 3]);
-        assert_eq!(parsed.field4, std::ffi::CString::new("test").unwrap());
+        assert_eq!(parsed.field4, CString::new("test").unwrap());
         assert_eq!(parsed.field5, Some(1024));
         assert_eq!(parsed.field6, Some([10, 20, 30, 40]));
         assert_eq!(parsed.field7, -500);
@@ -78,7 +82,7 @@ mod tests {
         assert_eq!(parsed.field1, 7);
         assert_eq!(parsed.field2, 3);
         assert_eq!(parsed.field3, vec![1, 2, 3]);
-        assert_eq!(parsed.field4, std::ffi::CString::new("test").unwrap());
+        assert_eq!(parsed.field4, CString::new("test").unwrap());
         assert_eq!(parsed.field5, Some(1024));
         assert_eq!(parsed.field6, Some([10, 20, 30, 40]));
         assert_eq!(parsed.field7, -500);
@@ -90,7 +94,7 @@ mod tests {
             field1: 7,
             field2: 3,
             field3: vec![1, 2, 3],
-            field4: std::ffi::CString::new("test").unwrap(),
+            field4: CString::new("test").unwrap(),
             field5: Some(1024),
             field6: Some([10, 20, 30, 40]),
             field7: -500,

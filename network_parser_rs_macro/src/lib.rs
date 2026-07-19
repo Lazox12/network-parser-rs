@@ -1,6 +1,11 @@
-mod utils;
+#![no_std]
+extern crate alloc;
+use alloc::{vec,format};
+use alloc::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::slice;
 
-#[allow(dead_code)] //todo
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{Expr, LitInt, Ident};
@@ -97,15 +102,15 @@ impl ToTokens for Type {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
             Type::UInt(bits) | Type::Int(bits) => {
-                let rust_ty = if *bits <= 8 { quote!(u8) } 
-                    else if *bits <= 16 { quote!(u16) } 
-                    else if *bits <= 32 { quote!(u32) } 
+                let rust_ty = if *bits <= 8 { quote!(u8) }
+                    else if *bits <= 16 { quote!(u16) }
+                    else if *bits <= 32 { quote!(u32) }
                     else { quote!(u64) };
-                
+
                 if matches!(self, Type::Int(_)) {
-                    let signed_ty = if *bits <= 8 { quote!(i8) } 
-                        else if *bits <= 16 { quote!(i16) } 
-                        else if *bits <= 32 { quote!(i32) } 
+                    let signed_ty = if *bits <= 8 { quote!(i8) }
+                        else if *bits <= 16 { quote!(i16) }
+                        else if *bits <= 32 { quote!(i32) }
                         else { quote!(i64) };
                     tokens.extend(signed_ty);
                 } else {
@@ -113,7 +118,7 @@ impl ToTokens for Type {
                 }
             }
             Type::Vec(_) => { tokens.extend(quote!(Vec<u8>)); }
-            Type::CStr(_) => { tokens.extend(quote!(std::ffi::CString)); }
+            Type::CStr(_) => { tokens.extend(quote!(alloc::ffi::CString)); }
             Type::Slice(len) => {
                 let len_lit = proc_macro2::Literal::u8_unsuffixed(*len);
                 tokens.extend(quote!([u8; #len_lit]));
@@ -129,7 +134,7 @@ impl ToTokens for Type {
 impl SyntaxTree {
     fn generate_try_from(&self) -> proc_macro2::TokenStream {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-        
+
         let mut field_reads = Vec::new();
         let mut struct_fields = Vec::new();
 
@@ -160,7 +165,7 @@ impl SyntaxTree {
 
                 fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
                     let mut bit_offset: usize = 0;
-                    
+
                     let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> Result<u64, &'static str> {
                         if *bit_offset + bits > data.len() * 8 {
                             return Err("EOF");
@@ -187,7 +192,7 @@ impl SyntaxTree {
                                 return Ok(u64::from_be_bytes(buf) as u64);
                             }
                         }
-                        
+
                         let mut val: u64 = 0;
                         for i in 0..bits {
                             let current_bit = *bit_offset + i;
@@ -212,7 +217,7 @@ impl SyntaxTree {
 
     fn generate_from_ptr(&self) -> proc_macro2::TokenStream {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-        
+
         let mut field_reads = Vec::new();
         let mut struct_fields = Vec::new();
 
@@ -241,7 +246,7 @@ impl SyntaxTree {
             impl From<*mut u8> for #struct_name {
                 fn from(ptr: *mut u8) -> Self {
                     let mut bit_offset: usize = 0;
-                    
+
                     let read_bits_ptr = |ptr: *const u8, bit_offset: &mut usize, bits: usize| -> u64 {
                         if *bit_offset % 8 == 0 {
                             let byte_idx = *bit_offset / 8;
@@ -251,21 +256,21 @@ impl SyntaxTree {
                             } else if bits == 16 {
                                 *bit_offset += 16;
                                 let mut buf = [0u8; 2];
-                                unsafe { std::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 2); }
+                                unsafe { core::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 2); }
                                 return u16::from_be_bytes(buf) as u64;
                             } else if bits == 32 {
                                 *bit_offset += 32;
                                 let mut buf = [0u8; 4];
-                                unsafe { std::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 4); }
+                                unsafe { core::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 4); }
                                 return u32::from_be_bytes(buf) as u64;
                             } else if bits == 64 {
                                 *bit_offset += 64;
                                 let mut buf = [0u8; 8];
-                                unsafe { std::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 8); }
+                                unsafe { core::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 8); }
                                 return u64::from_be_bytes(buf) as u64;
                             }
                         }
-                        
+
                         let mut val: u64 = 0;
                         for i in 0..bits {
                             let current_bit = *bit_offset + i;
@@ -290,7 +295,7 @@ impl SyntaxTree {
 
     fn generate_into(&self) -> proc_macro2::TokenStream {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-        
+
         let mut field_writes = Vec::new();
 
         for row in &self.inner {
@@ -318,7 +323,7 @@ impl SyntaxTree {
                 fn into(self) -> Vec<u8> {
                     let mut buffer: Vec<u8> = Vec::new();
                     let mut bit_offset: usize = 0;
-                    
+
                     let mut write_bits = |buffer: &mut Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
                         if *bit_offset % 8 == 0 {
                             let byte_idx = *bit_offset / 8;
@@ -344,16 +349,16 @@ impl SyntaxTree {
                                 return;
                             }
                         }
-                        
+
                         for i in 0..bits {
                             let current_bit = *bit_offset + i;
                             let byte_idx = current_bit / 8;
                             let bit_idx = 7 - (current_bit % 8);
-                            
+
                             while buffer.len() <= byte_idx {
                                 buffer.push(0);
                             }
-                            
+
                             let bit = (val >> (bits - 1 - i)) & 1;
                             buffer[byte_idx] |= (bit as u8) << bit_idx;
                         }
@@ -361,7 +366,7 @@ impl SyntaxTree {
                     };
 
                     #(#field_writes)*
-                    
+
                     buffer
                 }
             }
@@ -374,20 +379,20 @@ impl Type {
         match self {
             Type::UInt(bits) => {
                 let bits_lit = proc_macro2::Literal::u8_unsuffixed(*bits);
-                let rust_ty = if *bits <= 8 { quote!(u8) } 
-                    else if *bits <= 16 { quote!(u16) } 
-                    else if *bits <= 32 { quote!(u32) } 
+                let rust_ty = if *bits <= 8 { quote!(u8) }
+                    else if *bits <= 16 { quote!(u16) }
+                    else if *bits <= 32 { quote!(u32) }
                     else { quote!(u64) };
-                
+
                 quote! {
                     let #ident = read_bits(&data, &mut bit_offset, #bits_lit as usize)? as #rust_ty;
                 }
             }
             Type::Int(bits) => {
                 let bits_lit = proc_macro2::Literal::u8_unsuffixed(*bits);
-                let rust_ty = if *bits <= 8 { quote!(i8) } 
-                    else if *bits <= 16 { quote!(i16) } 
-                    else if *bits <= 32 { quote!(i32) } 
+                let rust_ty = if *bits <= 8 { quote!(i8) }
+                    else if *bits <= 16 { quote!(i16) }
+                    else if *bits <= 32 { quote!(i32) }
                     else { quote!(i64) };
 
                 quote! {
@@ -439,7 +444,7 @@ impl Type {
                         end += 1;
                     }
                     if end >= data.len() { return Err("EOF before null terminator"); }
-                    let #ident = std::ffi::CString::new(data[byte_offset..end].to_vec())
+                    let #ident = CString::new(data[byte_offset..end].to_vec())
                         .map_err(|_| "Invalid CStr")?;
                     bit_offset = (end + 1) * 8; // skip null byte
                 }
@@ -499,7 +504,7 @@ impl Type {
                     let byte_offset = bit_offset / 8;
                     let mut #ident = [0u8; #len_lit as usize];
                     unsafe {
-                        std::ptr::copy_nonoverlapping(ptr.add(byte_offset), #ident.as_mut_ptr(), #len_lit as usize);
+                        core::ptr::copy_nonoverlapping(ptr.add(byte_offset), #ident.as_mut_ptr(), #len_lit as usize);
                     }
                     bit_offset += (#len_lit as usize) * 8;
                 }
@@ -513,7 +518,7 @@ impl Type {
                         let mut #ident = Vec::with_capacity(len);
                         unsafe {
                             #ident.set_len(len);
-                            std::ptr::copy_nonoverlapping(ptr.add(byte_offset), #ident.as_mut_ptr(), len);
+                            core::ptr::copy_nonoverlapping(ptr.add(byte_offset), #ident.as_mut_ptr(), len);
                         }
                         bit_offset += len * 8;
                     }
@@ -532,8 +537,8 @@ impl Type {
                         while *ptr.add(end) != 0 {
                             end += 1;
                         }
-                        let slice = std::slice::from_raw_parts(ptr.add(byte_offset), end - byte_offset);
-                        std::ffi::CString::new(slice).expect("Invalid CStr")
+                        let slice = core::slice::from_raw_parts(ptr.add(byte_offset), end - byte_offset);
+                        alloc::ffi::CString::new(slice).expect("Invalid CStr")
                     };
                     bit_offset = (end + 1) * 8; // skip null byte
                 }

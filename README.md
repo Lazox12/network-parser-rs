@@ -1,5 +1,7 @@
 # Network Parser RS
 
+#### source code can be found at https://github.com/Lazox12/network-parser-rs
+
 `network_parser_rs` provides a procedural macro `make_struct!` designed to make it easy to define and parse network protocols and binary data structures. 
 
 With `make_struct!`, you can define custom bit-level and byte-level fields, skip padding, use conditional parsing, and dynamically size arrays based on previously parsed fields.
