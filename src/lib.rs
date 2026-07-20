@@ -164,4 +164,38 @@ mod tests {
         let parsed = BoxTest::try_from(buffer).unwrap();
         assert_eq!(parsed, instance);
     }
+
+    make_struct! {
+        #[derive(Debug, Clone, PartialEq)]
+        ExcludeTest,
+        normal_field: u8,
+        exclude {
+            ignored_field: u16,
+            another_ignored: bool,
+        }
+    }
+
+    #[test]
+    fn test_exclude() {
+        let instance = ExcludeTest {
+            normal_field: 42,
+            ignored_field: 999, // Should be ignored during serialization
+            another_ignored: true,
+        };
+        
+        let mut buffer = Vec::new();
+        let mut bit_offset = 0;
+        instance.clone().write_bits(&mut buffer, &mut bit_offset);
+        
+        // Only normal_field should be serialized (1 byte)
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer[0], 42);
+        
+        // When deserializing, ignored fields should be Default::default()
+        let mut read_offset = 0;
+        let parsed = ExcludeTest::try_from(buffer).unwrap();
+        assert_eq!(parsed.normal_field, 42);
+        assert_eq!(parsed.ignored_field, 0); // Default for u16
+        assert_eq!(parsed.another_ignored, false); // Default for bool
+    }
 }

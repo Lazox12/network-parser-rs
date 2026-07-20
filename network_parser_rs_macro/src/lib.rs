@@ -39,6 +39,7 @@ enum Type{
     Slice(u8),
     Optional(OptionType), // field defined behind if condition
     Box(Box<Type>),
+    Exclude(Box<Type>),
     Custom(syn::Type),
 }
 struct OptionType{
@@ -129,6 +130,9 @@ impl ToTokens for Type {
             Type::Box(inner) => {
                 let inner_tokens = quote!(#inner);
                 tokens.extend(quote!(Box<#inner_tokens>));
+            }
+            Type::Exclude(inner) => {
+                inner.to_tokens(tokens);
             }
             Type::Vec(_) => { tokens.extend(quote!(Vec<u8>)); }
             Type::CStr(_) => { tokens.extend(quote!(alloc::ffi::CString)); }
@@ -236,10 +240,6 @@ impl SyntaxTree {
                         Ok(val)
                     };
 
-                    let peek = |bits: usize| -> u64 {
-                        let mut temp_offset = bit_offset;
-                        read_bits(data, &mut temp_offset, bits).unwrap_or(0)
-                    };
 
                     #(#try_from_reads)*
 
@@ -288,10 +288,6 @@ impl SyntaxTree {
                         val
                     };
 
-                    let peek = |bits: usize| -> u64 {
-                        let mut temp_offset = bit_offset;
-                        read_bits_ptr(ptr, &mut temp_offset, bits)
-                    };
 
                     #(#ptr_reads)*
 
@@ -448,11 +444,20 @@ impl Type {
                 let inner_parse = inner_ty.generate_parse_code(&temp_ident);
                 
                 quote! {
-                    let #ident = if #condition {
-                        #inner_parse
-                        Some(#temp_ident)
-                    } else {
-                        None
+                    let #ident = {
+                        let condition_result = {
+                            let peek = |bits: usize| -> u64 {
+                                let mut temp_offset = bit_offset;
+                                read_bits(data, &mut temp_offset, bits).unwrap_or(0)
+                            };
+                            #condition
+                        };
+                        if condition_result {
+                            #inner_parse
+                            Some(#temp_ident)
+                        } else {
+                            None
+                        }
                     };
                 }
             }
@@ -462,6 +467,11 @@ impl Type {
                 quote! {
                     #inner_parse
                     let #ident = Box::new(#temp_ident);
+                }
+            }
+            Type::Exclude(_) => {
+                quote! {
+                    let #ident = Default::default();
                 }
             }
             Type::Custom(ty) => {
@@ -560,11 +570,20 @@ impl Type {
                 let inner_parse = inner_ty.generate_parse_code_ptr(&temp_ident);
                 
                 quote! {
-                    let #ident = if #condition {
-                        #inner_parse
-                        Some(#temp_ident)
-                    } else {
-                        None
+                    let #ident = {
+                        let condition_result = {
+                            let peek = |bits: usize| -> u64 {
+                                let mut temp_offset = bit_offset;
+                                read_bits_ptr(ptr, &mut temp_offset, bits)
+                            };
+                            #condition
+                        };
+                        if condition_result {
+                            #inner_parse
+                            Some(#temp_ident)
+                        } else {
+                            None
+                        }
                     };
                 }
             }
@@ -574,6 +593,11 @@ impl Type {
                 quote! {
                     #inner_parse
                     let #ident = Box::new(#temp_ident);
+                }
+            }
+            Type::Exclude(_) => {
+                quote! {
+                    let #ident = Default::default();
                 }
             }
             Type::Custom(ty) => {
@@ -644,6 +668,9 @@ impl Type {
                         #inner_write
                     }
                 }
+            }
+            Type::Exclude(_) => {
+                quote! {}
             }
             Type::Custom(_) => {
                 quote! {
@@ -793,6 +820,25 @@ impl Parse for SyntaxTree {
                     inner.push(Row::Field(Field {
                         identifier,
                         ty: Type::Optional(opt_type),
+                    }));
+                }
+            } else if input.peek(syn::Ident) && input.fork().parse::<Ident>().unwrap().to_string() == "exclude" {
+                input.parse::<Ident>()?; // exclude
+                let content;
+                syn::braced!(content in input);
+                
+                while !content.is_empty() {
+                    let identifier: Ident = content.parse()?;
+                    content.parse::<syn::Token![:]>()?;
+                    let ty: Type = content.parse()?;
+                    
+                    if content.peek(syn::Token![,]) {
+                        content.parse::<syn::Token![,]>()?;
+                    }
+                    
+                    inner.push(Row::Field(Field {
+                        identifier,
+                        ty: Type::Exclude(Box::new(ty)),
                     }));
                 }
             } else if input.fork().parse::<Ident>().is_ok() {
