@@ -156,7 +156,6 @@ impl SyntaxTree {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
         
         let mut try_from_reads = Vec::new();
-        let mut ptr_reads = Vec::new();
         let mut writes = Vec::new();
         let mut struct_fields = Vec::new();
 
@@ -168,8 +167,7 @@ impl SyntaxTree {
                         ConsumeType::Expr(expr) => quote!((#expr) as usize),
                     };
                     let consume_stmt = quote! { bit_offset += #amount; };
-                    try_from_reads.push(consume_stmt.clone());
-                    ptr_reads.push(consume_stmt);
+                    try_from_reads.push(consume_stmt);
                     writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
                 }
                 Row::ConditionalConsume(c, condition) => {
@@ -178,8 +176,7 @@ impl SyntaxTree {
                         ConsumeType::Expr(expr) => quote!((#expr) as usize),
                     };
                     let consume_stmt = quote! { if #condition { bit_offset += #amount; } };
-                    try_from_reads.push(consume_stmt.clone());
-                    ptr_reads.push(consume_stmt);
+                    try_from_reads.push(consume_stmt);
                     writes.push(quote! { if #condition { write_bits(&mut buffer, &mut bit_offset, #amount, 0); } });
                 }
                 Row::Field(f) => {
@@ -187,7 +184,6 @@ impl SyntaxTree {
                     let ty = &f.ty;
                     
                     try_from_reads.push(ty.generate_parse_code(ident));
-                    ptr_reads.push(ty.generate_parse_code_ptr(ident));
                     writes.push(ty.generate_write_code(&quote!(self.#ident)));
                     
                     struct_fields.push(ident);
@@ -240,7 +236,6 @@ impl SyntaxTree {
                         Ok(val)
                     };
 
-
                     #(#try_from_reads)*
 
                     *bit_offset_ref = bit_offset;
@@ -249,53 +244,7 @@ impl SyntaxTree {
                     })
                 }
 
-                fn parse_bits_ptr(ptr: *const u8, mut bit_offset_ref: &mut usize) -> Self {
-                    let mut bit_offset = *bit_offset_ref;
-                    
-                    let read_bits_ptr = |ptr: *const u8, bit_offset: &mut usize, bits: usize| -> u64 {
-                        if *bit_offset % 8 == 0 {
-                            let byte_idx = *bit_offset / 8;
-                            if bits == 8 {
-                                *bit_offset += 8;
-                                return unsafe { *ptr.add(byte_idx) as u64 };
-                            } else if bits == 16 {
-                                *bit_offset += 16;
-                                let mut buf = [0u8; 2];
-                                unsafe { core::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 2); }
-                                return u16::from_be_bytes(buf) as u64;
-                            } else if bits == 32 {
-                                *bit_offset += 32;
-                                let mut buf = [0u8; 4];
-                                unsafe { core::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 4); }
-                                return u32::from_be_bytes(buf) as u64;
-                            } else if bits == 64 {
-                                *bit_offset += 64;
-                                let mut buf = [0u8; 8];
-                                unsafe { core::ptr::copy_nonoverlapping(ptr.add(byte_idx), buf.as_mut_ptr(), 8); }
-                                return u64::from_be_bytes(buf) as u64;
-                            }
-                        }
-                        
-                        let mut val: u64 = 0;
-                        for i in 0..bits {
-                            let current_bit = *bit_offset + i;
-                            let byte_idx = current_bit / 8;
-                            let bit_idx = 7 - (current_bit % 8);
-                            let bit = unsafe { (*ptr.add(byte_idx) >> bit_idx) & 1 };
-                            val = (val << 1) | (bit as u64);
-                        }
-                        *bit_offset += bits;
-                        val
-                    };
 
-
-                    #(#ptr_reads)*
-
-                    *bit_offset_ref = bit_offset;
-                    Self {
-                        #(#struct_fields,)*
-                    }
-                }
 
                 fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
                     let mut bit_offset = *bit_offset_ref;
@@ -482,131 +431,7 @@ impl Type {
         }
     }
 
-    fn generate_parse_code_ptr(&self, ident: &Ident) -> proc_macro2::TokenStream {
-        match self {
-            Type::UInt(bits) => {
-                let bits_lit = proc_macro2::Literal::u8_unsuffixed(*bits);
-                let rust_ty = if *bits <= 8 { quote!(u8) } 
-                    else if *bits <= 16 { quote!(u16) } 
-                    else if *bits <= 32 { quote!(u32) } 
-                    else { quote!(u64) };
-                
-                quote! {
-                    let #ident = read_bits_ptr(ptr, &mut bit_offset, #bits_lit as usize) as #rust_ty;
-                }
-            }
-            Type::Bool => {
-                quote! {
-                    let #ident = read_bits_ptr(ptr, &mut bit_offset, 1) == 1;
-                }
-            }
-            Type::Int(bits) => {
-                let bits_lit = proc_macro2::Literal::u8_unsuffixed(*bits);
-                let rust_ty = if *bits <= 8 { quote!(i8) } 
-                    else if *bits <= 16 { quote!(i16) } 
-                    else if *bits <= 32 { quote!(i32) } 
-                    else { quote!(i64) };
 
-                quote! {
-                    let raw = read_bits_ptr(ptr, &mut bit_offset, #bits_lit as usize);
-                    let sign_extend = if (raw & (1 << (#bits_lit - 1))) != 0 {
-                        !0u64 << #bits_lit
-                    } else {
-                        0
-                    };
-                    let #ident = (raw | sign_extend) as #rust_ty;
-                }
-            }
-            Type::Slice(len) => {
-                let len_lit = proc_macro2::Literal::u8_unsuffixed(*len);
-                quote! {
-                    if bit_offset % 8 != 0 { panic!("Unaligned byte read for slice"); }
-                    let byte_offset = bit_offset / 8;
-                    let mut #ident = [0u8; #len_lit as usize];
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(ptr.add(byte_offset), #ident.as_mut_ptr(), #len_lit as usize);
-                    }
-                    bit_offset += (#len_lit as usize) * 8;
-                }
-            }
-            Type::Vec(size_opt) => {
-                if let Some(size_field) = size_opt {
-                    quote! {
-                        if bit_offset % 8 != 0 { panic!("Unaligned byte read for Vec"); }
-                        let byte_offset = bit_offset / 8;
-                        let len = #size_field as usize;
-                        let mut #ident = Vec::with_capacity(len);
-                        unsafe {
-                            #ident.set_len(len);
-                            core::ptr::copy_nonoverlapping(ptr.add(byte_offset), #ident.as_mut_ptr(), len);
-                        }
-                        bit_offset += len * 8;
-                    }
-                } else {
-                    quote! {
-                        compile_error!("Cannot read an unbounded Vec<u8> from a raw pointer");
-                    }
-                }
-            }
-            Type::CStr(_) => {
-                quote! {
-                    if bit_offset % 8 != 0 { panic!("Unaligned byte read for CStr"); }
-                    let byte_offset = bit_offset / 8;
-                    let mut end = byte_offset;
-                    let #ident = unsafe {
-                        while *ptr.add(end) != 0 {
-                            end += 1;
-                        }
-                        let slice = core::slice::from_raw_parts(ptr.add(byte_offset), end - byte_offset);
-                        alloc::ffi::CString::new(slice).expect("Invalid CStr")
-                    };
-                    bit_offset = (end + 1) * 8; // skip null byte
-                }
-            }
-            Type::Optional(opt) => {
-                let condition = &opt.condition;
-                let inner_ty = opt.ty.first().unwrap();
-                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
-                let inner_parse = inner_ty.generate_parse_code_ptr(&temp_ident);
-                
-                quote! {
-                    let #ident = {
-                        let condition_result = {
-                            let peek = |bits: usize| -> u64 {
-                                let mut temp_offset = bit_offset;
-                                read_bits_ptr(ptr, &mut temp_offset, bits)
-                            };
-                            #condition
-                        };
-                        if condition_result {
-                            #inner_parse
-                            Some(#temp_ident)
-                        } else {
-                            None
-                        }
-                    };
-                }
-            }
-            Type::Box(inner) => {
-                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
-                let inner_parse = inner.generate_parse_code_ptr(&temp_ident);
-                quote! {
-                    #inner_parse
-                    let #ident = Box::new(#temp_ident);
-                }
-            }
-            Type::Exclude(_) => {
-                quote! {
-                    let #ident = Default::default();
-                }
-            }
-            Type::Custom(ty) => {
-                quote! {
-                    let #ident = <#ty as NetworkParse>::parse_bits_ptr(ptr, &mut bit_offset);
-                }
-            }
-        }
-    }
 
     fn generate_write_code(&self, accessor: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         match self {
@@ -885,7 +710,7 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
         
         #network_parse_impl
         
-        impl core::convert::TryFrom<Vec<u8>> for #struct_name {
+        impl TryFrom<Vec<u8>> for #struct_name {
             type Error = &'static str;
             fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
                 let mut bit_offset = 0;
@@ -893,12 +718,7 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
             }
         }
         
-        impl core::convert::From<*mut u8> for #struct_name {
-            fn from(ptr: *mut u8) -> Self {
-                let mut bit_offset = 0;
-                Self::parse_bits_ptr(ptr, &mut bit_offset)
-            }
-        }
+
         
         impl core::convert::Into<Vec<u8>> for #struct_name {
             fn into(self) -> Vec<u8> {
