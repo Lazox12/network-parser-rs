@@ -33,6 +33,7 @@ make_struct! { MyStruct,
 enum Type{
     UInt(u8),
     Int(u8),
+    Bool,
     Vec(Option<Ident>), //identifier of the size field
     CStr(()),
     Slice(u8),
@@ -71,6 +72,7 @@ struct Field{
 }
 
 struct SyntaxTree{
+    pub attrs: Vec<syn::Attribute>,
     pub inner: Vec<Row>,
     pub struct_name: String
 }
@@ -82,7 +84,10 @@ impl ToTokens for SyntaxTree {
             Row::Consume(_) | Row::ConditionalConsume(_, _) => None,
         });
 
+        let attrs = &self.attrs;
+
         tokens.extend(quote! {
+            #(#attrs)*
             pub struct #struct_name {
                 #(#fields,)*
             }
@@ -103,6 +108,7 @@ impl ToTokens for Field {
 impl ToTokens for Type {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
+            Type::Bool => { tokens.extend(quote!(bool)); }
             Type::UInt(bits) | Type::Int(bits) => {
                 let rust_ty = if *bits <= 8 { quote!(u8) }
                     else if *bits <= 16 { quote!(u16) }
@@ -364,6 +370,11 @@ impl Type {
                     let #ident = read_bits(&data, &mut bit_offset, #bits_lit as usize)? as #rust_ty;
                 }
             }
+            Type::Bool => {
+                quote! {
+                    let #ident = read_bits(&data, &mut bit_offset, 1)? == 1;
+                }
+            }
             Type::Int(bits) => {
                 let bits_lit = proc_macro2::Literal::u8_unsuffixed(*bits);
                 let rust_ty = if *bits <= 8 { quote!(i8) }
@@ -459,6 +470,11 @@ impl Type {
                 
                 quote! {
                     let #ident = read_bits_ptr(ptr, &mut bit_offset, #bits_lit as usize) as #rust_ty;
+                }
+            }
+            Type::Bool => {
+                quote! {
+                    let #ident = read_bits_ptr(ptr, &mut bit_offset, 1) == 1;
                 }
             }
             Type::Int(bits) => {
@@ -562,6 +578,11 @@ impl Type {
                     write_bits(&mut buffer, &mut bit_offset, #bits_lit as usize, val);
                 }
             }
+            Type::Bool => {
+                quote! {
+                    write_bits(&mut buffer, &mut bit_offset, 1, if #accessor { 1 } else { 0 });
+                }
+            }
             Type::Slice(len) => {
                 let len_lit = proc_macro2::Literal::u8_unsuffixed(*len);
                 quote! {
@@ -596,7 +617,7 @@ impl Type {
             }
             Type::Custom(_) => {
                 quote! {
-                    (#accessor).write_bits(&mut buffer, &mut bit_offset);
+                    (#accessor).clone().write_bits(&mut buffer, &mut bit_offset);
                 }
             }
         }
@@ -631,22 +652,41 @@ impl Parse for Type {
                     input.parse::<Ident>()?; // advance
                     return Ok(Type::Int(num));
                 }
+            } else if ident_str == "bool" {
+                input.parse::<Ident>()?; // advance
+                return Ok(Type::Bool);
             }
 
             if ident_str == "Vec" {
                 input.parse::<Ident>()?; // advance
-                input.parse::<syn::Token![<]>()?;
-                let inner_ty: Ident = input.parse()?;
-                if inner_ty.to_string() != "u8" {
-                    return Err(syn::Error::new(inner_ty.span(), "Only u8 is supported in Vec"));
+                if input.peek(syn::token::Lt) {
+                    input.parse::<syn::Token![<]>()?;
+                    let inner_ty: Ident = input.parse()?;
+                    if inner_ty.to_string() != "u8" {
+                        return Err(syn::Error::new(inner_ty.span(), "Only u8 is supported in Vec"));
+                    }
+                    input.parse::<syn::Token![>]>()?;
                 }
-                input.parse::<syn::Token![>]>()?;
+                
                 let mut size_field = None;
                 if input.peek(syn::Token![;]) {
                     input.parse::<syn::Token![;]>()?;
-                    size_field = Some(input.parse()?);
+                    if let Ok(ident) = input.parse::<Ident>() {
+                        size_field = Some(ident);
+                    }
                 }
                 return Ok(Type::Vec(size_field));
+            } else if ident_str == "Option" {
+                input.parse::<Ident>()?; // advance
+                input.parse::<syn::Token![<]>()?;
+                let inner_ty: Type = input.parse()?;
+                input.parse::<syn::Token![>]>()?;
+                
+                let opt_type = OptionType {
+                    ty: Box::new(vec![inner_ty]),
+                    condition: quote!(true),
+                };
+                return Ok(Type::Optional(opt_type));
             }
 
             if ident_str == "CStr" {
@@ -669,6 +709,7 @@ impl Parse for Type {
 
 impl Parse for SyntaxTree {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        let attrs = input.call(syn::Attribute::parse_outer)?;
         let struct_name: Ident = input.parse()?;
         input.parse::<syn::Token![,]>()?;
 
@@ -744,6 +785,7 @@ impl Parse for SyntaxTree {
         }
 
         Ok(SyntaxTree {
+            attrs,
             inner,
             struct_name: struct_name.to_string(),
         })

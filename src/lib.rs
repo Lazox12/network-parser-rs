@@ -28,6 +28,7 @@ mod tests {
             field6: [u8; 4],
         }
         field7: i12, // 12-bit signed
+        consume(4)
         field8: [u8;4]
     }
 
@@ -57,7 +58,8 @@ mod tests {
             b't', b'e', b's', b't', 0x00, // byte 5-9: field4 (CStr)
             0x04, 0x00, // byte 10-11: field5 (u16) = 1024 (0x0400)
             10, 20, 30, 40, // byte 12-15: field6 ([u8; 4])
-            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100
+            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100, then 4 bits padding
+            6, 6, 6, 6, // byte 18-21: field8 ([u8; 4])
         ];
         
         let parsed = TestStruct::try_from(data).unwrap();
@@ -116,9 +118,24 @@ mod tests {
             b't', b'e', b's', b't', 0x00, // byte 5-9: field4 (CStr)
             0x04, 0x00, // byte 10-11: field5 (u16) = 1024 (0x0400)
             10, 20, 30, 40, // byte 12-15: field6 ([u8; 4])
-            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100
+            0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100, then 4 bits padding
+            6, 6, 6, 6, // byte 18-21: field8 ([u8; 4])
         ];
         
         assert_eq!(data, expected_data);
+    }
+
+    make_struct! { 
+        #[derive(Debug, Clone, PartialEq)]
+        AttributeTest,
+        field1: u8,
+    }
+
+    #[test]
+    fn test_attributes() {
+        let instance1 = AttributeTest { field1: 42 };
+        let instance2 = instance1.clone();
+        assert_eq!(instance1, instance2);
+        assert_eq!(format!("{:?}", instance1), "AttributeTest { field1: 42 }");
     }
 }

@@ -13,13 +13,16 @@ The syntax is designed to be highly readable while closely resembling Rust struc
 Here is an example showing the full capabilities of `make_struct!`:
 
 ```rust
-make_struct! { MyStruct,
+make_struct! {
+    #[derive(Debug, Clone)]
+    MyStruct,
     field1: u3,
-    consume(5) // skips 5 bits/bytes
+    consume(5) // skips 5 bits
     field2: u5,
-    field3: Vec<u8>;field1, // dynamically sized vector of length defined in field1
+    field3: Vec<u8>;field2, // dynamically sized vector of length defined in field2
     field4: CStr,
-    if peek(u8) == 15 {
+    if peek(8) == 15 {
+        consume(4) // conditionally skip 4 bits
         field5: u16,
         // field5 will be parsed as Option<u16>, filled only if the condition is met
     }
@@ -36,8 +39,9 @@ You can define unsigned and signed integer fields using `uX` or `iX` where `X` r
 
 ### 2. Skipping / Consuming Data
 If there is padding or reserved bits/bytes in the stream that you need to ignore, use `consume(expr)`.
-* `consume(5)`: Skips a literal amount.
-* `consume(my_func())`: Skips an amount determined by a dynamic expression.
+* `consume(5)`: Skips a literal amount of bits.
+* `consume(my_func())`: Skips an amount of bits determined by a dynamic expression.
+* **Conditionally skipping**: You can place `consume()` directives inside `if` blocks to skip bits only if a certain condition is met.
 
 ### 3. Dynamic Collections (`Vec`)
 Vectors can be dynamically sized based on fields that have already been parsed in the struct.
@@ -57,15 +61,21 @@ Standard fixed-sized byte arrays are fully supported.
 You can define fields that are only parsed if a specific condition evaluates to true at runtime. Fields defined inside an `if` block will automatically be wrapped in an `Option<T>` in the generated Rust struct.
 
 ```rust
-if peek(u8) == 15 {
+if peek(8) == 15 {
     field5: u16,
     field7: u8,
 }
 ```
 In the above example:
-* The parser will evaluate the expression `peek(u8) == 15`.
+* The parser will evaluate the expression `peek(8) == 15`. The `peek(bits)` closure is automatically injected into the parsing scope, allowing you to look ahead in the bit stream without advancing the cursor. Local field variables (e.g., `field1 == 7`) are also available in scope for both serialization and deserialization.
 * If true, it parses `field5` as a `u16` and `field7` as a `u8`, populating them as `Some(...)`.
 * If false, `field5` and `field7` are skipped and set to `None`.
+
+### 7. Struct Attributes
+You can easily add standard Rust attributes (like `#[derive(Debug, Clone, PartialEq)]`) to your generated structs by placing them immediately before the struct name.
+
+### 8. Custom Types (Nested Structs)
+You can seamlessly use other structs as types for your fields, provided they implement the `NetworkParse` trait. Because `make_struct!` automatically implements `NetworkParse` for any struct it generates, you can effortlessly nest dynamically sized network structures directly inside each other!
 
 
 ## An Example
@@ -77,20 +87,19 @@ use network_parser_rs::make_struct;
 make_struct!{ ethernetII_frame,
     dst_mac:[u8; 6],
     src_mac:[u8; 6],
-    if peek(u16) == 0x8100 {
-        consume(16);
+    if peek(16) == 0x8100 {
+        consume(16)
         pcp: u3,
         dei: bool,
-        vid: u12
+        vid: u12,
     }
     ethertype: u16,
     payload: Vec<u8>;
     
 }
 
-let data: vec<u8> = vec![];
-let frame = ethernetII_frame::parse(&data).unwrap();
-
+let data: Vec<u8> = vec![];
+let frame = ethernetII_frame::try_from(data).unwrap();
 ```
 
 ## Embeded development
