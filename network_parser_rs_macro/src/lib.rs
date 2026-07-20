@@ -732,3 +732,254 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+enum VariantMatch {
+    Exact(syn::Expr),
+    Condition(proc_macro2::TokenStream),
+    CatchAll,
+}
+
+struct EnumVariant {
+    ident: Ident,
+    inner_type: Option<syn::Type>,
+    variant_match: VariantMatch,
+}
+
+struct EnumDef {
+    enum_name: Ident,
+    repr_type: Ident,
+    variants: Vec<EnumVariant>,
+}
+
+impl syn::parse::Parse for EnumDef {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let enum_name: Ident = input.parse()?;
+        input.parse::<syn::Token![:]>()?;
+        let repr_type: Ident = input.parse()?;
+        
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+        }
+
+        let mut variants = Vec::new();
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            
+            let inner_type = if input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in input);
+                Some(content.parse::<syn::Type>()?)
+            } else {
+                None
+            };
+            let variant_match = if input.peek(syn::Token![=]) {
+                input.parse::<syn::Token![=]>()?;
+                VariantMatch::Exact(input.parse::<syn::Expr>()?)
+            } else if input.peek(syn::Token![_]) {
+                input.parse::<syn::Token![_]>()?;
+                VariantMatch::CatchAll
+            } else {
+                let mut cond = proc_macro2::TokenStream::new();
+                while !input.is_empty() && !input.peek(syn::Token![,]) {
+                    let tt: proc_macro2::TokenTree = input.parse()?;
+                    cond.extend(core::iter::once(tt));
+                }
+                VariantMatch::Condition(cond)
+            };
+            
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+            
+            variants.push(EnumVariant { ident, inner_type, variant_match });
+        }
+        
+        Ok(EnumDef { enum_name, repr_type, variants })
+    }
+}
+
+#[proc_macro]
+pub fn make_enum(input: TokenStream) -> TokenStream {
+    let parsed = syn::parse_macro_input!(input as EnumDef);
+    let enum_name = &parsed.enum_name;
+    let repr_type = &parsed.repr_type;
+    
+    let mut enum_variants = Vec::new();
+    let mut match_arms = Vec::new();
+    let mut write_arms = Vec::new();
+    
+    for variant in &parsed.variants {
+        let ident = &variant.ident;
+        
+        match &variant.variant_match {
+            VariantMatch::Exact(value) => {
+                if let Some(inner) = &variant.inner_type {
+                    enum_variants.push(quote! { #ident(#inner) });
+                    match_arms.push(quote! { #value => Ok(Self::#ident(Default::default())) });
+                    write_arms.push(quote! { Self::#ident(_) => #value });
+                } else {
+                    enum_variants.push(quote! { #ident });
+                    match_arms.push(quote! { #value => Ok(Self::#ident) });
+                    write_arms.push(quote! { Self::#ident => #value });
+                }
+            }
+            VariantMatch::Condition(cond) => {
+                if let Some(inner) = &variant.inner_type {
+                    enum_variants.push(quote! { #ident(#inner) });
+                    match_arms.push(quote! { v if v #cond => Ok(Self::#ident(v as #inner)) });
+                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type });
+                } else {
+                    enum_variants.push(quote! { #ident });
+                    match_arms.push(quote! { v if v #cond => Ok(Self::#ident) });
+                    write_arms.push(quote! { Self::#ident => 0 });
+                }
+            }
+            VariantMatch::CatchAll => {
+                if let Some(inner) = &variant.inner_type {
+                    enum_variants.push(quote! { #ident(#inner) });
+                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) });
+                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type });
+                } else {
+                    enum_variants.push(quote! { #ident });
+                    match_arms.push(quote! { _ => Ok(Self::#ident) });
+                    write_arms.push(quote! { Self::#ident => 0 });
+                }
+            }
+        }
+    }
+    
+    let repr_str = repr_type.to_string();
+    let bits_str = repr_str.trim_start_matches('u');
+    let bits: usize = bits_str.parse().unwrap_or_else(|_| panic!("Invalid repr type: {}", repr_str));
+
+    let expanded = quote! {
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum #enum_name {
+            #(#enum_variants),*
+        }
+        
+        impl NetworkParse for #enum_name {
+            fn parse_bits(data: &[u8], bit_offset_ref: &mut usize) -> Result<Self, &'static str> {
+                let mut bit_offset = *bit_offset_ref;
+                let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> Result<u64, &'static str> {
+                    if *bit_offset + bits > data.len() * 8 {
+                        return Err("EOF");
+                    }
+                    if *bit_offset % 8 == 0 {
+                        let byte_idx = *bit_offset / 8;
+                        if bits == 8 {
+                            *bit_offset += 8;
+                            return Ok(data[byte_idx] as u64);
+                        } else if bits == 16 {
+                            *bit_offset += 16;
+                            let mut buf = [0u8; 2];
+                            buf.copy_from_slice(&data[byte_idx..byte_idx+2]);
+                            return Ok(u16::from_be_bytes(buf) as u64);
+                        } else if bits == 32 {
+                            *bit_offset += 32;
+                            let mut buf = [0u8; 4];
+                            buf.copy_from_slice(&data[byte_idx..byte_idx+4]);
+                            return Ok(u32::from_be_bytes(buf) as u64);
+                        } else if bits == 64 {
+                            *bit_offset += 64;
+                            let mut buf = [0u8; 8];
+                            buf.copy_from_slice(&data[byte_idx..byte_idx+8]);
+                            return Ok(u64::from_be_bytes(buf) as u64);
+                        }
+                    }
+                    
+                    let mut val: u64 = 0;
+                    for i in 0..bits {
+                        let current_bit = *bit_offset + i;
+                        let byte_idx = current_bit / 8;
+                        let bit_idx = 7 - (current_bit % 8);
+                        let bit = (data[byte_idx] >> bit_idx) & 1;
+                        val = (val << 1) | (bit as u64);
+                    }
+                    *bit_offset += bits;
+                    Ok(val)
+                };
+
+                let tag_value = read_bits(data, &mut bit_offset, #bits)? as #repr_type;
+                *bit_offset_ref = bit_offset;
+                
+                match tag_value {
+                    #(#match_arms,)*
+                    _ => Err("Invalid enum variant tag")
+                }
+            }
+
+            fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
+                let tag_value = match self {
+                    #(#write_arms),*
+                };
+
+                let mut bit_offset = *bit_offset_ref;
+                let mut write_bits = |buffer: &mut Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
+                    if *bit_offset % 8 == 0 {
+                        let byte_idx = *bit_offset / 8;
+                        if bits == 8 {
+                            while buffer.len() <= byte_idx { buffer.push(0); }
+                            buffer[byte_idx] = val as u8;
+                            *bit_offset += 8;
+                            return;
+                        } else if bits == 16 {
+                            while buffer.len() <= byte_idx + 1 { buffer.push(0); }
+                            buffer[byte_idx..byte_idx+2].copy_from_slice(&(val as u16).to_be_bytes());
+                            *bit_offset += 16;
+                            return;
+                        } else if bits == 32 {
+                            while buffer.len() <= byte_idx + 3 { buffer.push(0); }
+                            buffer[byte_idx..byte_idx+4].copy_from_slice(&(val as u32).to_be_bytes());
+                            *bit_offset += 32;
+                            return;
+                        } else if bits == 64 {
+                            while buffer.len() <= byte_idx + 7 { buffer.push(0); }
+                            buffer[byte_idx..byte_idx+8].copy_from_slice(&(val as u64).to_be_bytes());
+                            *bit_offset += 64;
+                            return;
+                        }
+                    }
+                    
+                    for i in 0..bits {
+                        let current_bit = *bit_offset + i;
+                        let byte_idx = current_bit / 8;
+                        let bit_idx = 7 - (current_bit % 8);
+                        
+                        while buffer.len() <= byte_idx { buffer.push(0); }
+                        
+                        let bit = (val >> (bits - 1 - i)) & 1;
+                        if bit == 1 {
+                            buffer[byte_idx] |= 1 << bit_idx;
+                        } else {
+                            buffer[byte_idx] &= !(1 << bit_idx);
+                        }
+                    }
+                    *bit_offset += bits;
+                };
+
+                write_bits(&mut buffer, &mut bit_offset, #bits, tag_value as u64);
+                *bit_offset_ref = bit_offset;
+            }
+        }
+        
+        impl TryFrom<Vec<u8>> for #enum_name {
+            type Error = &'static str;
+            fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
+                let mut bit_offset = 0;
+                Self::parse_bits(&data, &mut bit_offset)
+            }
+        }
+        
+        impl core::convert::Into<Vec<u8>> for #enum_name {
+            fn into(self) -> Vec<u8> {
+                let mut buffer = Vec::new();
+                let mut bit_offset = 0;
+                self.write_bits(&mut buffer, &mut bit_offset);
+                buffer
+            }
+        }
+    };
+    
+    TokenStream::from(expanded)
+}
