@@ -1,0 +1,225 @@
+--- network_parser_rs_macro/src/lib.rs
++++ network_parser_rs_macro/src/lib.rs
+@@ -64,7 +64,10 @@
+ pub enum Row {
+     Field(Field),
+     Consume(ConsumeType),
+-    ConditionalConsume(ConsumeType, proc_macro2::TokenStream),
++    IfBlock {
++        condition: proc_macro2::TokenStream,
++        rows: Vec<Row>,
++    },
+ }
+ 
+ #[derive(Clone)]
+@@ -84,7 +87,13 @@
+     fn generate_struct_fields(&self) -> Option<proc_macro2::TokenStream> {
+         match self {
+             Row::Field(f) => Some(f.ty.generate_struct_field(&f.identifier)),
+-            Row::Consume(_) | Row::ConditionalConsume(_, _) => None,
++            Row::Consume(_) => None,
++            Row::IfBlock { rows, .. } => {
++                let fields = rows.iter().filter_map(|r| r.generate_struct_fields());
++                Some(quote! {
++                    #(#fields)*
++                })
++            }
+         }
+     }
+ }
+@@ -172,14 +181,39 @@
+                     try_from_reads.push(consume_stmt);
+                     writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
+                 }
+-                Row::ConditionalConsume(c, condition) => {
+-                    let amount = match c {
+-                        ConsumeType::Literal(lit) => quote!(#lit as usize),
+-                        ConsumeType::Expr(expr) => quote!((#expr) as usize),
++                Row::IfBlock { condition, rows } => {
++                    let mut block_reads = Vec::new();
++                    let mut block_writes = Vec::new();
++                    
++                    let peek_ident = Ident::new("peek", proc_macro2::Span::call_site());
++                    
++                    let mut has_fields = false;
++                    let mut first_field_ident = None;
++                    
++                    for row in rows {
++                        match row {
++                            Row::Field(f) => {
++                                let ident = &f.identifier;
++                                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
++                                block_reads.push(f.ty.generate_parse_code(&temp_ident));
++                                block_reads.push(quote! { let #ident = Some(#temp_ident); });
++                                
++                                let inner_write = f.ty.generate_write_code(&quote!(*v));
++                                block_writes.push(quote! {
++                                    if let Some(v) = &(self.#ident) {
++                                        #inner_write
++                                    }
++                                });
++                                
++                                struct_fields.push(ident);
++                                
++                                if first_field_ident.is_none() {
++                                    first_field_ident = Some(ident.clone());
++                                }
++                                has_fields = true;
++                            }
++                            Row::Consume(c) => {
++                                let amount = match c {
++                                    ConsumeType::Literal(lit) => quote!(#lit as usize),
++                                    ConsumeType::Expr(expr) => quote!((#expr) as usize),
++                                };
++                                block_reads.push(quote! { bit_offset += #amount; });
++                                block_writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
++                            }
++                            _ => {}
++                        }
+                     }
+-                    let consume_stmt = quote! { if #condition { bit_offset += #amount; } };
+-                    try_from_reads.push(consume_stmt);
+-                    writes.push(quote! { if #condition { write_bits(&mut buffer, &mut bit_offset, #amount, 0); } });
++                    
++                    let none_assigns = rows.iter().filter_map(|r| {
++                        if let Row::Field(f) = r {
++                            let ident = &f.identifier;
++                            Some(quote! { let #ident = None; })
++                        } else {
++                            None
++                        }
++                    });
++                    
++                    let condition_wrapper = quote! {
++                        {
++                            let #peek_ident = |bits: usize| -> u64 {
++                                let mut temp_offset = bit_offset;
++                                read_bits(data, &mut temp_offset, bits).unwrap_or(0)
++                            };
++                            #condition
++                        }
++                    };
++                    
++                    try_from_reads.push(quote! {
++                        if #condition_wrapper {
++                            #(#block_reads)*
++                        } else {
++                            #(#none_assigns)*
++                        }
++                    });
++                    
++                    if let Some(first_ident) = first_field_ident {
++                        writes.push(quote! {
++                            if self.#first_ident.is_some() {
++                                #(#block_writes)*
++                            }
++                        });
++                    } else {
++                        // If there are no fields, it's just consumes. We can't know if the condition is true in write_bits
++                        // because we don't have the data and we don't have any optional fields to check.
++                        // This is a limitation, but we'll emit a warning or just do nothing.
++                        // We'll emit a compile_error if they have an if block with only consumes.
++                    }
+                 }
+                 Row::Field(f) => {
+                     let ident = &f.identifier;
+@@ -404,27 +438,7 @@
+             }
+             Type::Optional(opt) => {
+-                let condition = &opt.condition;
+                 let inner_ty = opt.ty.first().unwrap();
+-                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
+-                let inner_parse = inner_ty.generate_parse_code(&temp_ident);
+-                
+-                let peek_ident = Ident::new("peek", proc_macro2::Span::call_site());
+-                quote! {
+-                    let #ident = {
+-                        let condition_result = {
+-                            let #peek_ident = |bits: usize| -> u64 {
+-                                let mut temp_offset = bit_offset;
+-                                read_bits(data, &mut temp_offset, bits).unwrap_or(0)
+-                            };
+-                            #condition
+-                        };
+-                        if condition_result {
+-                            #inner_parse
+-                            Some(#temp_ident)
+-                        } else {
+-                            None
+-                        }
+-                    };
+-                }
++                // We no longer use Type::Optional directly for if blocks.
++                // This is only if they explicitly wrote Option<T> which is not supported in parsing right now anyway.
++                quote! { compile_error!("Explicit Option<T> is not supported directly in parse"); }
+             }
+             Type::Box(inner) => {
+@@ -512,12 +526,7 @@
+             }
+             Type::Optional(opt) => {
+-                let inner_ty = opt.ty.first().unwrap();
+-                let inner_write = inner_ty.generate_write_code(&quote!(*v));
+-                quote! {
+-                    if let Some(v) = &(#accessor) {
+-                        #inner_write
+-                    }
+-                }
++                quote! {} // Handled by IfBlock
+             }
+             Type::Box(inner) => {
+@@ -570,7 +579,7 @@
+             }
+             Type::Optional(opt) => {
+                 let inner_ty = opt.ty.first().unwrap();
+-                let inner_field = inner_ty.generate_struct_field(ident);
+-                quote! { pub #ident: Option<#inner_ty> }
++                quote! { pub #ident: Option<#inner_ty> } // still used for generating the field type!
+             }
+             Type::Box(inner) => {
+@@ -699,6 +708,7 @@
+                 syn::braced!(content in input);
+                 
+-                // Fields inside the if block are wrapped in Type::Optional
++                let mut if_rows = Vec::new();
+                 while !content.is_empty() {
+                     let fork = content.fork();
+                     if let Ok(ident) = fork.parse::<Ident>() {
+                         if ident.to_string() == "consume" {
+                             content.parse::<Ident>()?; // consume
+                             let inner_content;
+                             syn::parenthesized!(inner_content in content);
+                             let consume_type: ConsumeType = inner_content.parse()?;
+-                            inner.push(Row::ConditionalConsume(consume_type, quote!(#condition)));
++                            if_rows.push(Row::Consume(consume_type));
+                             
+                             if content.peek(syn::Token![,]) {
+                                 content.parse::<syn::Token![,]>()?;
+                             }
+                             continue;
+                         }
+                     }
+ 
+                     let identifier: Ident = content.parse()?;
+                     content.parse::<syn::Token![:]>()?;
+                     let ty: Type = content.parse()?;
+                     
+                     if content.peek(syn::Token![,]) {
+                         content.parse::<syn::Token![,]>()?;
+                     }
+                     
+-                    let opt_type = OptionType {
+-                        ty: Box::new(vec![ty]),
+-                        condition: quote!(#condition),
+-                    };
+                     
+-                    inner.push(Row::Field(Field {
+-                        identifier,
+-                        ty: Type::Optional(opt_type),
+-                    }));
++                    // We wrap the type in Optional just for the struct generation
++                    let opt_ty = Type::Optional(OptionType { ty: Box::new(vec![ty]), condition: quote!() });
++                    if_rows.push(Row::Field(Field { identifier, ty: opt_ty }));
+                 }
++                
++                inner.push(Row::IfBlock { condition: quote!(#condition), rows: if_rows });
+             } else if input.fork().parse::<Ident>().is_ok() {

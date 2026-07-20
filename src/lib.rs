@@ -246,3 +246,5 @@ mod tests {
     }
 }pub mod tests_usize;
 pub mod tests_peek;
+pub mod tests_peek_multi;
+pub mod tests_eth;

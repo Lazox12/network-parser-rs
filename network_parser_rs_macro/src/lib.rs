@@ -65,7 +65,10 @@ impl Parse for ConsumeType {
 
 enum Row {
     Consume(ConsumeType),
-    ConditionalConsume(ConsumeType, proc_macro2::TokenStream),
+    IfBlock {
+        condition: proc_macro2::TokenStream,
+        rows: Vec<Row>,
+    },
     Field(Field),
 }
 
@@ -82,10 +85,23 @@ struct SyntaxTree{
 impl ToTokens for SyntaxTree {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-        let fields = self.inner.iter().filter_map(|row| match row {
-            Row::Field(f) => Some(quote!(#f)),
-            Row::Consume(_) | Row::ConditionalConsume(_, _) => None,
-        });
+        
+        let mut fields = Vec::new();
+        for row in &self.inner {
+            match row {
+                Row::Field(f) => fields.push(quote!(#f)),
+                Row::Consume(_) => {},
+                Row::IfBlock { rows, .. } => {
+                    for r in rows {
+                        if let Row::Field(f) = r {
+                            let ident = &f.identifier;
+                            let ty = &f.ty;
+                            fields.push(quote!(pub #ident: Option<#ty>));
+                        }
+                    }
+                }
+            }
+        }
 
         let attrs = &self.attrs;
 
@@ -172,14 +188,74 @@ impl SyntaxTree {
                     try_from_reads.push(consume_stmt);
                     writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
                 }
-                Row::ConditionalConsume(c, condition) => {
-                    let amount = match c {
-                        ConsumeType::Literal(lit) => quote!(#lit as usize),
-                        ConsumeType::Expr(expr) => quote!((#expr) as usize),
+                Row::IfBlock { condition, rows } => {
+                    let mut block_reads = Vec::new();
+                    let mut block_writes = Vec::new();
+                    let mut block_decls = Vec::new();
+                    
+                    let peek_ident = Ident::new("peek", proc_macro2::Span::call_site());
+                    
+                    let mut first_field_ident = None;
+                    
+                    for row in rows {
+                        match row {
+                            Row::Field(f) => {
+                                let ident = &f.identifier;
+                                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
+                                block_decls.push(quote! { let mut #ident = None; });
+                                block_reads.push(f.ty.generate_parse_code(&temp_ident));
+                                block_reads.push(quote! { #ident = Some(#temp_ident); });
+                                
+                                let inner_write = f.ty.generate_write_code(&quote!(*v));
+                                block_writes.push(quote! {
+                                    if let Some(v) = &(self.#ident) {
+                                        #inner_write
+                                    }
+                                });
+                                
+                                struct_fields.push(ident);
+                                
+                                if first_field_ident.is_none() {
+                                    first_field_ident = Some(ident.clone());
+                                }
+                            }
+                            Row::Consume(c) => {
+                                let amount = match c {
+                                    ConsumeType::Literal(lit) => quote!(#lit as usize),
+                                    ConsumeType::Expr(expr) => quote!((#expr) as usize),
+                                };
+                                block_reads.push(quote! { bit_offset += #amount; });
+                                block_writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
+                            }
+                            _ => {}
+                        }
+                    }
+                    
+                    let condition_wrapper = quote! {
+                        {
+                            let #peek_ident = |bits: usize| -> u64 {
+                                let mut temp_offset = bit_offset;
+                                read_bits(data, &mut temp_offset, bits).unwrap_or(0)
+                            };
+                            #condition
+                        }
                     };
-                    let consume_stmt = quote! { if #condition { bit_offset += #amount; } };
-                    try_from_reads.push(consume_stmt);
-                    writes.push(quote! { if #condition { write_bits(&mut buffer, &mut bit_offset, #amount, 0); } });
+                    
+                    try_from_reads.push(quote! {
+                        #(#block_decls)*
+                        let condition_result = #condition_wrapper;
+                        if condition_result {
+                            #(#block_reads)*
+                        }
+                    });
+                    
+                    if let Some(first_ident) = first_field_ident {
+                        writes.push(quote! {
+                            if self.#first_ident.is_some() {
+                                #(#block_writes)*
+                            }
+                        });
+                    }
                 }
                 Row::Field(f) => {
                     let ident = &f.identifier;
@@ -402,10 +478,11 @@ impl Type {
                 let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
                 let inner_parse = inner_ty.generate_parse_code(&temp_ident);
                 
+                let peek_ident = Ident::new("peek", proc_macro2::Span::call_site());
                 quote! {
                     let #ident = {
                         let condition_result = {
-                            let peek = |bits: usize| -> u64 {
+                            let #peek_ident = |bits: usize| -> u64 {
                                 let mut temp_offset = bit_offset;
                                 read_bits(data, &mut temp_offset, bits).unwrap_or(0)
                             };
@@ -460,7 +537,7 @@ impl Type {
             }
             Type::Bool => {
                 quote! {
-                    write_bits(&mut buffer, &mut bit_offset, 1, if *#accessor { 1 } else { 0 });
+                    write_bits(&mut buffer, &mut bit_offset, 1, if #accessor { 1 } else { 0 });
                 }
             }
             Type::USize => {
@@ -634,6 +711,7 @@ impl Parse for SyntaxTree {
                 syn::braced!(content in input);
                 
                 // Fields inside the if block are wrapped in Type::Optional
+                let mut if_rows = Vec::new();
                 while !content.is_empty() {
                     let fork = content.fork();
                     if let Ok(ident) = fork.parse::<Ident>() {
@@ -642,7 +720,7 @@ impl Parse for SyntaxTree {
                             let inner_content;
                             syn::parenthesized!(inner_content in content);
                             let consume_type: ConsumeType = inner_content.parse()?;
-                            inner.push(Row::ConditionalConsume(consume_type, quote!(#condition)));
+                            if_rows.push(Row::Consume(consume_type));
                             
                             if content.peek(syn::Token![,]) {
                                 content.parse::<syn::Token![,]>()?;
@@ -659,16 +737,12 @@ impl Parse for SyntaxTree {
                         content.parse::<syn::Token![,]>()?;
                     }
                     
-                    let opt_type = OptionType {
-                        ty: Box::new(vec![ty]),
-                        condition: quote!(#condition),
-                    };
-                    
-                    inner.push(Row::Field(Field {
+                    if_rows.push(Row::Field(Field {
                         identifier,
-                        ty: Type::Optional(opt_type),
+                        ty,
                     }));
                 }
+                inner.push(Row::IfBlock { condition: quote!(#condition), rows: if_rows });
             } else if input.peek(syn::Ident) && input.fork().parse::<Ident>().unwrap().to_string() == "exclude" {
                 input.parse::<Ident>()?; // exclude
                 let content;
@@ -728,6 +802,7 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
     let network_parse_impl = parsed.generate_network_parse();
 
     let expanded = quote! {
+        use network_parser_rs::NetworkParse;
         #parsed
         
         #network_parse_impl
