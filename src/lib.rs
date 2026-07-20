@@ -3,7 +3,11 @@ use core::convert::{TryFrom, From, Into};
 extern crate alloc;
 use alloc::vec::Vec;
 
-pub trait NetworkParse: TryFrom<Vec<u8>> + From<*mut u8> + Into<Vec<u8>> {}
+pub trait NetworkParse: Sized + TryFrom<Vec<u8>> + From<*mut u8> + Into<Vec<u8>> {
+    fn parse_bits(data: &[u8], bit_offset: &mut usize) -> Result<Self, &'static str>;
+    fn parse_bits_ptr(ptr: *const u8, bit_offset: &mut usize) -> Self;
+    fn write_bits(self, buffer: &mut Vec<u8>, bit_offset: &mut usize);
+}
 
 pub use network_parser_rs_macro::make_struct;
 
@@ -24,6 +28,7 @@ mod tests {
             field6: [u8; 4],
         }
         field7: i12, // 12-bit signed
+        field8: [u8;4]
     }
 
     #[test]
@@ -37,6 +42,7 @@ mod tests {
             field5: Some(1024),
             field6: Some([10, 20, 30, 40]),
             field7: -500,
+            field8: [6,6,6,6],
         };
         
         assert_eq!(instance.field1, 7);
@@ -98,6 +104,7 @@ mod tests {
             field5: Some(1024),
             field6: Some([10, 20, 30, 40]),
             field7: -500,
+            field8: [6,6,6,6],
         };
         
         let data: Vec<u8> = instance.into();

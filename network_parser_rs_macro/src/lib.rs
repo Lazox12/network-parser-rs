@@ -37,6 +37,7 @@ enum Type{
     CStr(()),
     Slice(u8),
     Optional(OptionType), // field defined behind if condition
+    Custom(syn::Type),
 }
 struct OptionType{
     pub ty: Box<Vec<Type>>, // vec is here because multiple types can be defined behind the if condition
@@ -60,6 +61,7 @@ impl Parse for ConsumeType {
 
 enum Row {
     Consume(ConsumeType),
+    ConditionalConsume(ConsumeType, proc_macro2::TokenStream),
     Field(Field),
 }
 
@@ -77,7 +79,7 @@ impl ToTokens for SyntaxTree {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
         let fields = self.inner.iter().filter_map(|row| match row {
             Row::Field(f) => Some(quote!(#f)),
-            Row::Consume(_) => None,
+            Row::Consume(_) | Row::ConditionalConsume(_, _) => None,
         });
 
         tokens.extend(quote! {
@@ -127,15 +129,20 @@ impl ToTokens for Type {
                 let inner_ty = opt.ty.first().unwrap();
                 tokens.extend(quote!(Option<#inner_ty>));
             }
+            Type::Custom(ty) => {
+                tokens.extend(quote!(#ty));
+            }
         }
     }
 }
 
 impl SyntaxTree {
-    fn generate_try_from(&self) -> proc_macro2::TokenStream {
+    fn generate_network_parse(&self) -> proc_macro2::TokenStream {
         let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-
-        let mut field_reads = Vec::new();
+        
+        let mut try_from_reads = Vec::new();
+        let mut ptr_reads = Vec::new();
+        let mut writes = Vec::new();
         let mut struct_fields = Vec::new();
 
         for row in &self.inner {
@@ -145,27 +152,40 @@ impl SyntaxTree {
                         ConsumeType::Literal(lit) => quote!(#lit as usize),
                         ConsumeType::Expr(expr) => quote!((#expr) as usize),
                     };
-                    field_reads.push(quote! {
-                        bit_offset += #amount;
-                    });
+                    let consume_stmt = quote! { bit_offset += #amount; };
+                    try_from_reads.push(consume_stmt.clone());
+                    ptr_reads.push(consume_stmt);
+                    writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
+                }
+                Row::ConditionalConsume(c, condition) => {
+                    let amount = match c {
+                        ConsumeType::Literal(lit) => quote!(#lit as usize),
+                        ConsumeType::Expr(expr) => quote!((#expr) as usize),
+                    };
+                    let consume_stmt = quote! { if #condition { bit_offset += #amount; } };
+                    try_from_reads.push(consume_stmt.clone());
+                    ptr_reads.push(consume_stmt);
+                    writes.push(quote! { if #condition { write_bits(&mut buffer, &mut bit_offset, #amount, 0); } });
                 }
                 Row::Field(f) => {
                     let ident = &f.identifier;
                     let ty = &f.ty;
-                    let parse_code = ty.generate_parse_code(ident);
-                    field_reads.push(parse_code);
+                    
+                    try_from_reads.push(ty.generate_parse_code(ident));
+                    ptr_reads.push(ty.generate_parse_code_ptr(ident));
+                    writes.push(ty.generate_write_code(&quote!(self.#ident)));
+                    
                     struct_fields.push(ident);
                 }
             }
         }
 
         quote! {
-            impl TryFrom<Vec<u8>> for #struct_name {
-                type Error = &'static str;
-
-                fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
-                    let mut bit_offset: usize = 0;
-
+            impl NetworkParse for #struct_name {
+                fn parse_bits(data: &[u8], mut bit_offset_ref: &mut usize) -> Result<Self, &'static str> {
+                    // Create a local alias for macro logic which uses `bit_offset`
+                    let mut bit_offset = *bit_offset_ref;
+                    
                     let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> Result<u64, &'static str> {
                         if *bit_offset + bits > data.len() * 8 {
                             return Err("EOF");
@@ -192,7 +212,7 @@ impl SyntaxTree {
                                 return Ok(u64::from_be_bytes(buf) as u64);
                             }
                         }
-
+                        
                         let mut val: u64 = 0;
                         for i in 0..bits {
                             let current_bit = *bit_offset + i;
@@ -205,48 +225,22 @@ impl SyntaxTree {
                         Ok(val)
                     };
 
-                    #(#field_reads)*
+                    let peek = |bits: usize| -> u64 {
+                        let mut temp_offset = bit_offset;
+                        read_bits(data, &mut temp_offset, bits).unwrap_or(0)
+                    };
 
+                    #(#try_from_reads)*
+
+                    *bit_offset_ref = bit_offset;
                     Ok(Self {
                         #(#struct_fields,)*
                     })
                 }
-            }
-        }
-    }
 
-    fn generate_from_ptr(&self) -> proc_macro2::TokenStream {
-        let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-
-        let mut field_reads = Vec::new();
-        let mut struct_fields = Vec::new();
-
-        for row in &self.inner {
-            match row {
-                Row::Consume(c) => {
-                    let amount = match c {
-                        ConsumeType::Literal(lit) => quote!(#lit as usize),
-                        ConsumeType::Expr(expr) => quote!((#expr) as usize),
-                    };
-                    field_reads.push(quote! {
-                        bit_offset += #amount;
-                    });
-                }
-                Row::Field(f) => {
-                    let ident = &f.identifier;
-                    let ty = &f.ty;
-                    let parse_code = ty.generate_parse_code_ptr(ident);
-                    field_reads.push(parse_code);
-                    struct_fields.push(ident);
-                }
-            }
-        }
-
-        quote! {
-            impl From<*mut u8> for #struct_name {
-                fn from(ptr: *mut u8) -> Self {
-                    let mut bit_offset: usize = 0;
-
+                fn parse_bits_ptr(ptr: *const u8, mut bit_offset_ref: &mut usize) -> Self {
+                    let mut bit_offset = *bit_offset_ref;
+                    
                     let read_bits_ptr = |ptr: *const u8, bit_offset: &mut usize, bits: usize| -> u64 {
                         if *bit_offset % 8 == 0 {
                             let byte_idx = *bit_offset / 8;
@@ -270,7 +264,7 @@ impl SyntaxTree {
                                 return u64::from_be_bytes(buf) as u64;
                             }
                         }
-
+                        
                         let mut val: u64 = 0;
                         for i in 0..bits {
                             let current_bit = *bit_offset + i;
@@ -283,47 +277,22 @@ impl SyntaxTree {
                         val
                     };
 
-                    #(#field_reads)*
+                    let peek = |bits: usize| -> u64 {
+                        let mut temp_offset = bit_offset;
+                        read_bits_ptr(ptr, &mut temp_offset, bits)
+                    };
 
+                    #(#ptr_reads)*
+
+                    *bit_offset_ref = bit_offset;
                     Self {
                         #(#struct_fields,)*
                     }
                 }
-            }
-        }
-    }
 
-    fn generate_into(&self) -> proc_macro2::TokenStream {
-        let struct_name = Ident::new(&self.struct_name, proc_macro2::Span::call_site());
-
-        let mut field_writes = Vec::new();
-
-        for row in &self.inner {
-            match row {
-                Row::Consume(c) => {
-                    let amount = match c {
-                        ConsumeType::Literal(lit) => quote!(#lit as usize),
-                        ConsumeType::Expr(expr) => quote!((#expr) as usize),
-                    };
-                    field_writes.push(quote! {
-                        write_bits(&mut buffer, &mut bit_offset, #amount, 0);
-                    });
-                }
-                Row::Field(f) => {
-                    let ident = &f.identifier;
-                    let ty = &f.ty;
-                    let write_code = ty.generate_write_code(&quote!(self.#ident));
-                    field_writes.push(write_code);
-                }
-            }
-        }
-
-        quote! {
-            impl Into<Vec<u8>> for #struct_name {
-                fn into(self) -> Vec<u8> {
-                    let mut buffer: Vec<u8> = Vec::new();
-                    let mut bit_offset: usize = 0;
-
+                fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
+                    let mut bit_offset = *bit_offset_ref;
+                    
                     let mut write_bits = |buffer: &mut Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
                         if *bit_offset % 8 == 0 {
                             let byte_idx = *bit_offset / 8;
@@ -349,25 +318,32 @@ impl SyntaxTree {
                                 return;
                             }
                         }
-
+                        
                         for i in 0..bits {
                             let current_bit = *bit_offset + i;
                             let byte_idx = current_bit / 8;
                             let bit_idx = 7 - (current_bit % 8);
-
+                            
                             while buffer.len() <= byte_idx {
                                 buffer.push(0);
                             }
-
+                            
                             let bit = (val >> (bits - 1 - i)) & 1;
                             buffer[byte_idx] |= (bit as u8) << bit_idx;
                         }
                         *bit_offset += bits;
                     };
 
-                    #(#field_writes)*
+                    #[allow(unused_variables)]
+                    let peek = |bits: usize| -> u64 { 0 };
 
-                    buffer
+                    #(
+                        let #struct_fields = self.#struct_fields.clone();
+                    )*
+
+                    #(#writes)*
+
+                    *bit_offset_ref = bit_offset;
                 }
             }
         }
@@ -464,6 +440,11 @@ impl Type {
                     };
                 }
             }
+            Type::Custom(ty) => {
+                quote! {
+                    let #ident = <#ty as NetworkParse>::parse_bits(data, &mut bit_offset)?;
+                }
+            }
         }
     }
 
@@ -558,6 +539,11 @@ impl Type {
                     };
                 }
             }
+            Type::Custom(ty) => {
+                quote! {
+                    let #ident = <#ty as NetworkParse>::parse_bits_ptr(ptr, &mut bit_offset);
+                }
+            }
         }
     }
 
@@ -608,6 +594,11 @@ impl Type {
                     }
                 }
             }
+            Type::Custom(_) => {
+                quote! {
+                    (#accessor).write_bits(&mut buffer, &mut bit_offset);
+                }
+            }
         }
     }
 }
@@ -626,43 +617,53 @@ impl Parse for Type {
             return Ok(Type::Slice(len.base10_parse()?));
         }
 
-        let ident: Ident = input.parse()?;
-        let ident_str = ident.to_string();
+        let fork = input.fork();
+        if let Ok(ident) = fork.parse::<Ident>() {
+            let ident_str = ident.to_string();
 
-        if ident_str.starts_with('u') && ident_str.len() > 1 {
-            if let Ok(num) = ident_str[1..].parse::<u8>() {
-                return Ok(Type::UInt(num));
+            if ident_str.starts_with('u') && ident_str.len() > 1 {
+                if let Ok(num) = ident_str[1..].parse::<u8>() {
+                    input.parse::<Ident>()?; // advance
+                    return Ok(Type::UInt(num));
+                }
+            } else if ident_str.starts_with('i') && ident_str.len() > 1 {
+                if let Ok(num) = ident_str[1..].parse::<u8>() {
+                    input.parse::<Ident>()?; // advance
+                    return Ok(Type::Int(num));
+                }
             }
-        } else if ident_str.starts_with('i') && ident_str.len() > 1 {
-            if let Ok(num) = ident_str[1..].parse::<u8>() {
-                return Ok(Type::Int(num));
+
+            if ident_str == "Vec" {
+                input.parse::<Ident>()?; // advance
+                input.parse::<syn::Token![<]>()?;
+                let inner_ty: Ident = input.parse()?;
+                if inner_ty.to_string() != "u8" {
+                    return Err(syn::Error::new(inner_ty.span(), "Only u8 is supported in Vec"));
+                }
+                input.parse::<syn::Token![>]>()?;
+                let mut size_field = None;
+                if input.peek(syn::Token![;]) {
+                    input.parse::<syn::Token![;]>()?;
+                    size_field = Some(input.parse()?);
+                }
+                return Ok(Type::Vec(size_field));
+            }
+
+            if ident_str == "CStr" {
+                input.parse::<Ident>()?; // advance
+                if input.peek(syn::Token![;]) {
+                    input.parse::<syn::Token![;]>()?;
+                    let _size_field: Ident = input.parse()?;
+                }
+                return Ok(Type::CStr(()));
             }
         }
 
-        if ident_str == "Vec" {
-            input.parse::<syn::Token![<]>()?;
-            let inner_ty: Ident = input.parse()?;
-            if inner_ty.to_string() != "u8" {
-                return Err(syn::Error::new(inner_ty.span(), "Only u8 is supported in Vec"));
-            }
-            input.parse::<syn::Token![>]>()?;
-            let mut size_field = None;
-            if input.peek(syn::Token![;]) {
-                input.parse::<syn::Token![;]>()?;
-                size_field = Some(input.parse()?);
-            }
-            return Ok(Type::Vec(size_field));
+        if let Ok(custom_ty) = input.parse::<syn::Type>() {
+            return Ok(Type::Custom(custom_ty));
         }
 
-        if ident_str == "CStr" {
-            if input.peek(syn::Token![;]) {
-                input.parse::<syn::Token![;]>()?;
-                let _size_field: Ident = input.parse()?;
-            }
-            return Ok(Type::CStr(()));
-        }
-
-        Err(syn::Error::new(ident.span(), "Unknown type"))
+        Err(input.error("Unknown type: Expected a valid primitive (e.g. u8, i16, Vec<u8>, CStr) or a custom type implementing NetworkParse"))
     }
 }
 
@@ -683,6 +684,22 @@ impl Parse for SyntaxTree {
                 
                 // Fields inside the if block are wrapped in Type::Optional
                 while !content.is_empty() {
+                    let fork = content.fork();
+                    if let Ok(ident) = fork.parse::<Ident>() {
+                        if ident.to_string() == "consume" {
+                            content.parse::<Ident>()?; // consume
+                            let inner_content;
+                            syn::parenthesized!(inner_content in content);
+                            let consume_type: ConsumeType = inner_content.parse()?;
+                            inner.push(Row::ConditionalConsume(consume_type, quote!(#condition)));
+                            
+                            if content.peek(syn::Token![,]) {
+                                content.parse::<syn::Token![,]>()?;
+                            }
+                            continue;
+                        }
+                    }
+
                     let identifier: Ident = content.parse()?;
                     content.parse::<syn::Token![:]>()?;
                     let ty: Type = content.parse()?;
@@ -718,7 +735,7 @@ impl Parse for SyntaxTree {
                     inner.push(Row::Field(Field { identifier, ty }));
                 }
             } else {
-                return Err(input.error("Expected field, consume, or if block"));
+                return Err(input.error("Expected a field definition (e.g. `field: u8`), a `consume(N)` directive, or an `if` block"));
             }
 
             if input.peek(syn::Token![,]) {
@@ -733,28 +750,40 @@ impl Parse for SyntaxTree {
     }
 }
 
-impl From<TokenStream> for SyntaxTree {
-    fn from(value: TokenStream) -> Self {
-        syn::parse(value).expect("Failed to parse SyntaxTree")
-    }
-}
 #[proc_macro]
 pub fn make_struct(input: TokenStream) -> TokenStream {
-    let parsed: SyntaxTree = input.into();
+    let parsed = syn::parse_macro_input!(input as SyntaxTree);
     let struct_name = Ident::new(&parsed.struct_name, proc_macro2::Span::call_site());
-
-    let try_from_impl = parsed.generate_try_from();
-    let from_ptr_impl = parsed.generate_from_ptr();
-    let into_impl = parsed.generate_into();
+    let network_parse_impl = parsed.generate_network_parse();
 
     let expanded = quote! {
         #parsed
         
-        #try_from_impl
-        #from_ptr_impl
-        #into_impl
+        #network_parse_impl
         
-        impl NetworkParse for #struct_name {}
+        impl core::convert::TryFrom<Vec<u8>> for #struct_name {
+            type Error = &'static str;
+            fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
+                let mut bit_offset = 0;
+                Self::parse_bits(&data, &mut bit_offset)
+            }
+        }
+        
+        impl core::convert::From<*mut u8> for #struct_name {
+            fn from(ptr: *mut u8) -> Self {
+                let mut bit_offset = 0;
+                Self::parse_bits_ptr(ptr, &mut bit_offset)
+            }
+        }
+        
+        impl core::convert::Into<Vec<u8>> for #struct_name {
+            fn into(self) -> Vec<u8> {
+                let mut buffer = Vec::new();
+                let mut bit_offset = 0;
+                self.write_bits(&mut buffer, &mut bit_offset);
+                buffer
+            }
+        }
     };
 
     TokenStream::from(expanded)
