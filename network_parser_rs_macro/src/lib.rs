@@ -34,6 +34,7 @@ enum Type{
     UInt(u8),
     Int(u8),
     Bool,
+    USize,
     Vec(Option<Ident>), //identifier of the size field
     CStr(()),
     Slice(u8),
@@ -111,6 +112,7 @@ impl ToTokens for Type {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
             Type::Bool => { tokens.extend(quote!(bool)); }
+            Type::USize => { tokens.extend(quote!(usize)); }
             Type::UInt(bits) | Type::Int(bits) => {
                 let rust_ty = if *bits <= 8 { quote!(u8) }
                     else if *bits <= 16 { quote!(u16) }
@@ -236,6 +238,8 @@ impl SyntaxTree {
                         Ok(val)
                     };
 
+
+
                     #(#try_from_reads)*
 
                     *bit_offset_ref = bit_offset;
@@ -291,7 +295,7 @@ impl SyntaxTree {
                     };
 
                     #[allow(unused_variables)]
-                    let peek = |bits: usize| -> u64 { 0 };
+
 
                     #(
                         let #struct_fields = self.#struct_fields.clone();
@@ -323,6 +327,12 @@ impl Type {
             Type::Bool => {
                 quote! {
                     let #ident = read_bits(&data, &mut bit_offset, 1)? == 1;
+                }
+            }
+            Type::USize => {
+                quote! {
+                    let bits = core::mem::size_of::<usize>() * 8;
+                    let #ident = read_bits(&data, &mut bit_offset, bits)? as usize;
                 }
             }
             Type::Int(bits) => {
@@ -450,7 +460,13 @@ impl Type {
             }
             Type::Bool => {
                 quote! {
-                    write_bits(&mut buffer, &mut bit_offset, 1, if #accessor { 1 } else { 0 });
+                    write_bits(&mut buffer, &mut bit_offset, 1, if *#accessor { 1 } else { 0 });
+                }
+            }
+            Type::USize => {
+                quote! {
+                    let bits = core::mem::size_of::<usize>() * 8;
+                    write_bits(&mut buffer, &mut bit_offset, bits, (#accessor) as u64);
                 }
             }
             Type::Slice(len) => {
@@ -524,7 +540,13 @@ impl Parse for Type {
         if let Ok(ident) = fork.parse::<Ident>() {
             let ident_str = ident.to_string();
 
-            if ident_str.starts_with('u') && ident_str.len() > 1 {
+            if ident_str == "bool" {
+                input.parse::<Ident>()?; // advance
+                return Ok(Type::Bool);
+            } else if ident_str == "usize" {
+                input.parse::<Ident>()?; // advance
+                return Ok(Type::USize);
+            } else if ident_str.starts_with('u') && ident_str.len() > 1 {
                 if let Ok(num) = ident_str[1..].parse::<u8>() {
                     input.parse::<Ident>()?; // advance
                     return Ok(Type::UInt(num));
@@ -534,9 +556,6 @@ impl Parse for Type {
                     input.parse::<Ident>()?; // advance
                     return Ok(Type::Int(num));
                 }
-            } else if ident_str == "bool" {
-                input.parse::<Ident>()?; // advance
-                return Ok(Type::Bool);
             }
 
             if ident_str == "Vec" {
@@ -599,11 +618,14 @@ impl Parse for SyntaxTree {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let attrs = input.call(syn::Attribute::parse_outer)?;
         let struct_name: Ident = input.parse()?;
-        input.parse::<syn::Token![,]>()?;
+        
+        let struct_content;
+        syn::braced!(struct_content in input);
 
         let mut inner = Vec::new();
 
-        while !input.is_empty() {
+        while !struct_content.is_empty() {
+            let input = &struct_content;
             if input.peek(syn::Token![if]) {
                 input.parse::<syn::Token![if]>()?;
                 let condition = input.parse::<Expr>()?;
@@ -737,6 +759,7 @@ enum VariantMatch {
     Exact(syn::Expr),
     Condition(proc_macro2::TokenStream),
     CatchAll,
+    Assignment(syn::Expr, proc_macro2::TokenStream),
 }
 
 struct EnumVariant {
@@ -745,24 +768,43 @@ struct EnumVariant {
     variant_match: VariantMatch,
 }
 
+fn replace_self_with_tag_value(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    ts.into_iter().map(|tt| {
+        match tt {
+            proc_macro2::TokenTree::Ident(ident) if ident == "self" => {
+                proc_macro2::TokenTree::Ident(proc_macro2::Ident::new("tag_value", ident.span()))
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                let new_stream = replace_self_with_tag_value(group.stream());
+                let mut new_group = proc_macro2::Group::new(group.delimiter(), new_stream);
+                new_group.set_span(group.span());
+                proc_macro2::TokenTree::Group(new_group)
+            }
+            _ => tt,
+        }
+    }).collect()
+}
+
 struct EnumDef {
+    attrs: Vec<syn::Attribute>,
     enum_name: Ident,
-    repr_type: Ident,
+    repr_type: Type,
     variants: Vec<EnumVariant>,
 }
 
 impl syn::parse::Parse for EnumDef {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let attrs = input.call(syn::Attribute::parse_outer)?;
         let enum_name: Ident = input.parse()?;
         input.parse::<syn::Token![:]>()?;
-        let repr_type: Ident = input.parse()?;
+        let repr_type: Type = input.parse()?;
         
-        if input.peek(syn::Token![,]) {
-            input.parse::<syn::Token![,]>()?;
-        }
+        let struct_content;
+        syn::braced!(struct_content in input);
 
         let mut variants = Vec::new();
-        while !input.is_empty() {
+        while !struct_content.is_empty() {
+            let input = &struct_content;
             let ident: Ident = input.parse()?;
             
             let inner_type = if input.peek(syn::token::Paren) {
@@ -772,9 +814,32 @@ impl syn::parse::Parse for EnumDef {
             } else {
                 None
             };
-            let variant_match = if input.peek(syn::Token![=]) {
+            let variant_match = if input.peek(syn::Token![=]) && input.peek2(syn::Token![=]) {
+                input.parse::<syn::Token![=]>()?;
                 input.parse::<syn::Token![=]>()?;
                 VariantMatch::Exact(input.parse::<syn::Expr>()?)
+            } else if input.peek(syn::Token![=]) {
+                input.parse::<syn::Token![=]>()?;
+                let mut expr_tokens = proc_macro2::TokenStream::new();
+                while !input.is_empty() && !input.peek(syn::Token![if]) && !input.peek(syn::Token![,]) {
+                    let tt: proc_macro2::TokenTree = input.parse()?;
+                    expr_tokens.extend(core::iter::once(tt));
+                }
+                
+                let expr_tokens = replace_self_with_tag_value(expr_tokens);
+                let expr = syn::parse2::<syn::Expr>(expr_tokens).expect("Invalid expression in assignment match");
+                
+                let mut cond_tokens = proc_macro2::TokenStream::new();
+                if input.peek(syn::Token![if]) {
+                    input.parse::<syn::Token![if]>()?;
+                    while !input.is_empty() && !input.peek(syn::Token![,]) {
+                        let tt: proc_macro2::TokenTree = input.parse()?;
+                        cond_tokens.extend(core::iter::once(tt));
+                    }
+                } else {
+                    cond_tokens.extend(quote!(true));
+                }
+                VariantMatch::Assignment(expr, replace_self_with_tag_value(cond_tokens))
             } else if input.peek(syn::Token![_]) {
                 input.parse::<syn::Token![_]>()?;
                 VariantMatch::CatchAll
@@ -784,7 +849,7 @@ impl syn::parse::Parse for EnumDef {
                     let tt: proc_macro2::TokenTree = input.parse()?;
                     cond.extend(core::iter::once(tt));
                 }
-                VariantMatch::Condition(cond)
+                VariantMatch::Condition(replace_self_with_tag_value(cond))
             };
             
             if input.peek(syn::Token![,]) {
@@ -794,7 +859,7 @@ impl syn::parse::Parse for EnumDef {
             variants.push(EnumVariant { ident, inner_type, variant_match });
         }
         
-        Ok(EnumDef { enum_name, repr_type, variants })
+        Ok(EnumDef { attrs, enum_name, repr_type, variants })
     }
 }
 
@@ -823,37 +888,52 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                     write_arms.push(quote! { Self::#ident => #value });
                 }
             }
+            VariantMatch::Assignment(expr, cond) => {
+                if let Some(inner) = &variant.inner_type {
+                    enum_variants.push(quote! { #ident(#inner) });
+                    match_arms.push(quote! { _ if #cond => Ok(Self::#ident(#expr)) });
+                    write_arms.push(quote! { Self::#ident(_) => Default::default() }); // Fallback on serialize
+                } else {
+                    enum_variants.push(quote! { #ident });
+                    match_arms.push(quote! { _ if #cond => Ok(Self::#ident) });
+                    write_arms.push(quote! { Self::#ident => Default::default() });
+                }
+            }
             VariantMatch::Condition(cond) => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident(v as #inner)) });
-                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type });
+                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type }); // Wait, v as #repr_type still casts. If it's a Vec<u8>, user shouldn't use Condition.
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => 0 });
+                    write_arms.push(quote! { Self::#ident => Default::default() });
                 }
             }
             VariantMatch::CatchAll => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
-                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) });
+                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) }); // same here, shouldn't use CatchAll on non primitives unless they don't care about type cast errors
                     write_arms.push(quote! { Self::#ident(v) => v as #repr_type });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { _ => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => 0 });
+                    write_arms.push(quote! { Self::#ident => Default::default() });
                 }
             }
         }
     }
     
-    let repr_str = repr_type.to_string();
-    let bits_str = repr_str.trim_start_matches('u');
-    let bits: usize = bits_str.parse().unwrap_or_else(|_| panic!("Invalid repr type: {}", repr_str));
+    let repr_type = &parsed.repr_type;
+    
+    let tag_value_ident = Ident::new("tag_value", proc_macro2::Span::call_site());
+    let parse_tag_value = repr_type.generate_parse_code(&tag_value_ident);
+    let write_tag_value = repr_type.generate_write_code(&quote!(tag_value));
+
+    let attrs = &parsed.attrs;
 
     let expanded = quote! {
-        #[derive(Debug, Clone, PartialEq)]
+        #(#attrs)*
         pub enum #enum_name {
             #(#enum_variants),*
         }
@@ -900,7 +980,8 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                     Ok(val)
                 };
 
-                let tag_value = read_bits(data, &mut bit_offset, #bits)? as #repr_type;
+                #parse_tag_value
+                
                 *bit_offset_ref = bit_offset;
                 
                 match tag_value {
@@ -958,7 +1039,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                     *bit_offset += bits;
                 };
 
-                write_bits(&mut buffer, &mut bit_offset, #bits, tag_value as u64);
+                #write_tag_value
                 *bit_offset_ref = bit_offset;
             }
         }

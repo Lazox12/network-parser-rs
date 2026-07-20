@@ -15,7 +15,7 @@ mod tests {
     use alloc::ffi::CString;
     use super::*;
 
-    make_struct! { TestStruct,
+    make_struct! { TestStruct {
         field1: u3,
         consume(5) // skips 5 bits (completes the first byte)
         field2: u5,
@@ -29,7 +29,7 @@ mod tests {
         field7: i12, // 12-bit signed
         consume(4)
         field8: [u8;4]
-    }
+    }}
 
     #[test]
     fn test_struct_fields_exist() {
@@ -44,7 +44,7 @@ mod tests {
             field7: -500,
             field8: [6,6,6,6],
         };
-        
+
         assert_eq!(instance.field1, 7);
     }
 
@@ -60,7 +60,7 @@ mod tests {
             0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100, then 4 bits padding
             6, 6, 6, 6, // byte 18-21: field8 ([u8; 4])
         ];
-        
+
         let parsed = TestStruct::try_from(data).unwrap();
         assert_eq!(parsed.field1, 7);
         assert_eq!(parsed.field2, 3);
@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(parsed.field6, Some([10, 20, 30, 40]));
         assert_eq!(parsed.field7, -500);
     }
-    
+
 
     #[test]
     fn test_into_vec() {
@@ -84,9 +84,9 @@ mod tests {
             field7: -500,
             field8: [6,6,6,6],
         };
-        
+
         let data: Vec<u8> = instance.into();
-        
+
         let expected_data: Vec<u8> = vec![
             0b1110_0000, // byte 0: field1 = 7 (u3) = 111, consume(5) = 00000
             0b0001_1000, // byte 1: field2 = 3 (u5) = 00011, consume(3) = 000
@@ -97,15 +97,13 @@ mod tests {
             0b1110_0000, 0b1100_0000, // byte 16-17: field7 = -500 (i12) -> 1110_0000_1100, then 4 bits padding
             6, 6, 6, 6, // byte 18-21: field8 ([u8; 4])
         ];
-        
+
         assert_eq!(data, expected_data);
     }
 
-    make_struct! { 
-        #[derive(Debug, Clone, PartialEq)]
-        AttributeTest,
+    make_struct! { #[derive(Debug, Clone, PartialEq)] AttributeTest {
         field1: u8,
-    }
+    }}
 
     #[test]
     fn test_attributes() {
@@ -117,14 +115,16 @@ mod tests {
 
     make_struct! {
         #[derive(Debug, Clone, PartialEq)]
-        BoxTestInner,
-        inner_field: u8,
+        BoxTestInner {
+            inner_field: u8,
+        }
     }
 
     make_struct! {
         #[derive(Debug, Clone, PartialEq)]
-        BoxTest,
-        boxed_field: Box<BoxTestInner>,
+        BoxTest {
+            boxed_field: Box<BoxTestInner>,
+        }
     }
 
     #[test]
@@ -143,11 +143,12 @@ mod tests {
 
     make_struct! {
         #[derive(Debug, Clone, PartialEq)]
-        ExcludeTest,
-        normal_field: u8,
-        exclude {
-            ignored_field: u16,
-            another_ignored: bool,
+        ExcludeTest {
+            normal_field: u8,
+            exclude {
+                ignored_field: u16,
+                another_ignored: bool,
+            }
         }
     }
 
@@ -176,11 +177,22 @@ mod tests {
     }
 
     make_enum! {
-        TestEnum: u16,
-        field1 = 123,
-        field2(u8) = 542,
-        field3(u16) < 1524,
-        field4(u16) _
+        #[derive(Debug, Clone, PartialEq)]
+        TestEnum: u16 {
+            field1 == 123,
+            field2(u8) == 542,
+            field5(Vec<u8>) = vec![1, 2, 3] if tag_value == 555,
+            field3(u16) < 1524,
+            field4(u16) _
+        }
+    }
+
+    make_enum! {
+        #[derive(Clone, Debug, PartialEq)]
+        EthIpType: Vec<u8> {
+            IPv4(Vec<u8>) = self.clone() if self.len() == 4,
+            IPv6(Vec<u8>) _
+        }
     }
 
     #[test]
@@ -220,5 +232,17 @@ mod tests {
         let mut bit_offset4 = 0;
         let parsed4 = TestEnum::parse_bits(&buffer4, &mut bit_offset4).unwrap();
         assert_eq!(parsed4, TestEnum::field4(2000));
+        
+        // Test Vec<u8> as repr_type
+        let data6 = vec![1, 2, 3, 4];
+        let mut bit_offset6 = 0;
+        let parsed6 = EthIpType::parse_bits(&data6, &mut bit_offset6).unwrap();
+        assert_eq!(parsed6, EthIpType::IPv4(vec![1, 2, 3, 4]));
+        
+        let data7 = vec![1, 2, 3, 4, 5, 6];
+        let mut bit_offset7 = 0;
+        let parsed7 = EthIpType::parse_bits(&data7, &mut bit_offset7).unwrap();
+        assert_eq!(parsed7, EthIpType::IPv6(vec![1, 2, 3, 4, 5, 6]));
     }
-}
+}pub mod tests_usize;
+pub mod tests_peek;
