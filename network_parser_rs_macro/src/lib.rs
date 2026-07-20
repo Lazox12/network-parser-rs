@@ -38,6 +38,7 @@ enum Type{
     CStr(()),
     Slice(u8),
     Optional(OptionType), // field defined behind if condition
+    Box(Box<Type>),
     Custom(syn::Type),
 }
 struct OptionType{
@@ -124,6 +125,10 @@ impl ToTokens for Type {
                 } else {
                     tokens.extend(rust_ty);
                 }
+            }
+            Type::Box(inner) => {
+                let inner_tokens = quote!(#inner);
+                tokens.extend(quote!(Box<#inner_tokens>));
             }
             Type::Vec(_) => { tokens.extend(quote!(Vec<u8>)); }
             Type::CStr(_) => { tokens.extend(quote!(alloc::ffi::CString)); }
@@ -451,6 +456,14 @@ impl Type {
                     };
                 }
             }
+            Type::Box(inner) => {
+                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
+                let inner_parse = inner.generate_parse_code(&temp_ident);
+                quote! {
+                    #inner_parse
+                    let #ident = Box::new(#temp_ident);
+                }
+            }
             Type::Custom(ty) => {
                 quote! {
                     let #ident = <#ty as NetworkParse>::parse_bits(data, &mut bit_offset)?;
@@ -555,6 +568,14 @@ impl Type {
                     };
                 }
             }
+            Type::Box(inner) => {
+                let temp_ident = Ident::new(&format!("{}_temp", ident), proc_macro2::Span::call_site());
+                let inner_parse = inner.generate_parse_code_ptr(&temp_ident);
+                quote! {
+                    #inner_parse
+                    let #ident = Box::new(#temp_ident);
+                }
+            }
             Type::Custom(ty) => {
                 quote! {
                     let #ident = <#ty as NetworkParse>::parse_bits_ptr(ptr, &mut bit_offset);
@@ -611,6 +632,15 @@ impl Type {
                 let inner_write = inner_ty.generate_write_code(&quote!(*v));
                 quote! {
                     if let Some(v) = &(#accessor) {
+                        #inner_write
+                    }
+                }
+            }
+            Type::Box(inner) => {
+                let inner_write = inner.generate_write_code(&quote!(**v));
+                quote! {
+                    {
+                        let v = &(#accessor);
                         #inner_write
                     }
                 }
@@ -687,6 +717,12 @@ impl Parse for Type {
                     condition: quote!(true),
                 };
                 return Ok(Type::Optional(opt_type));
+            } else if ident_str == "Box" {
+                input.parse::<Ident>()?; // advance
+                input.parse::<syn::Token![<]>()?;
+                let inner_ty: Type = input.parse()?;
+                input.parse::<syn::Token![>]>()?;
+                return Ok(Type::Box(Box::new(inner_ty)));
             }
 
             if ident_str == "CStr" {

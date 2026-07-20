@@ -138,4 +138,30 @@ mod tests {
         assert_eq!(instance1, instance2);
         assert_eq!(format!("{:?}", instance1), "AttributeTest { field1: 42 }");
     }
+
+    make_struct! {
+        #[derive(Debug, Clone, PartialEq)]
+        BoxTestInner,
+        inner_field: u8,
+    }
+
+    make_struct! {
+        #[derive(Debug, Clone, PartialEq)]
+        BoxTest,
+        boxed_field: Box<BoxTestInner>,
+    }
+
+    #[test]
+    fn test_box() {
+        let instance = BoxTest {
+            boxed_field: alloc::boxed::Box::new(BoxTestInner { inner_field: 42 }),
+        };
+        let mut buffer = Vec::new();
+        let mut bit_offset = 0;
+        instance.clone().write_bits(&mut buffer, &mut bit_offset);
+        
+        let mut read_offset = 0;
+        let parsed = BoxTest::try_from(buffer).unwrap();
+        assert_eq!(parsed, instance);
+    }
 }
