@@ -2,6 +2,7 @@
 use core::convert::{TryFrom, From, Into};
 extern crate alloc;
 use alloc::vec::Vec;
+extern crate self as network_parser_rs;
 
 pub trait NetworkParse: Sized + TryFrom<Vec<u8>> + Into<Vec<u8>> {
     fn parse_bits(data: &[u8], bit_offset: &mut usize) -> Result<Self, &'static str>;

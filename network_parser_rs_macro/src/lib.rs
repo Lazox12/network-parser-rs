@@ -270,7 +270,7 @@ impl SyntaxTree {
         }
 
         quote! {
-            impl NetworkParse for #struct_name {
+            impl network_parser_rs::NetworkParse for #struct_name {
                 fn parse_bits(data: &[u8], mut bit_offset_ref: &mut usize) -> Result<Self, &'static str> {
                     // Create a local alias for macro logic which uses `bit_offset`
                     let mut bit_offset = *bit_offset_ref;
@@ -512,7 +512,7 @@ impl Type {
             }
             Type::Custom(ty) => {
                 quote! {
-                    let #ident = <#ty as NetworkParse>::parse_bits(data, &mut bit_offset)?;
+                    let #ident = <#ty as network_parser_rs::NetworkParse>::parse_bits(data, &mut bit_offset)?;
                 }
             }
         }
@@ -590,9 +590,9 @@ impl Type {
             Type::Exclude(_) => {
                 quote! {}
             }
-            Type::Custom(_) => {
+            Type::Custom(ty) => {
                 quote! {
-                    (#accessor).clone().write_bits(&mut buffer, &mut bit_offset);
+                    <#ty as network_parser_rs::NetworkParse>::write_bits((#accessor).clone(), &mut buffer, &mut bit_offset);
                 }
             }
         }
@@ -800,28 +800,26 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
     let parsed = syn::parse_macro_input!(input as SyntaxTree);
     let struct_name = Ident::new(&parsed.struct_name, proc_macro2::Span::call_site());
     let network_parse_impl = parsed.generate_network_parse();
-
     let expanded = quote! {
-        use network_parser_rs::NetworkParse;
+
+
         #parsed
         
         #network_parse_impl
         
-        impl TryFrom<Vec<u8>> for #struct_name {
+        impl core::convert::TryFrom<Vec<u8>> for #struct_name {
             type Error = &'static str;
             fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
                 let mut bit_offset = 0;
-                Self::parse_bits(&data, &mut bit_offset)
+                <Self as network_parser_rs::NetworkParse>::parse_bits(&data, &mut bit_offset)
             }
         }
-        
-
         
         impl core::convert::Into<Vec<u8>> for #struct_name {
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 let mut bit_offset = 0;
-                self.write_bits(&mut buffer, &mut bit_offset);
+                network_parser_rs::NetworkParse::write_bits(self, &mut buffer, &mut bit_offset);
                 buffer
             }
         }
@@ -1013,7 +1011,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             #(#enum_variants),*
         }
         
-        impl NetworkParse for #enum_name {
+        impl network_parser_rs::NetworkParse for #enum_name {
             fn parse_bits(data: &[u8], bit_offset_ref: &mut usize) -> Result<Self, &'static str> {
                 let mut bit_offset = *bit_offset_ref;
                 let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> Result<u64, &'static str> {
@@ -1119,11 +1117,11 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             }
         }
         
-        impl TryFrom<Vec<u8>> for #enum_name {
+        impl core::convert::TryFrom<Vec<u8>> for #enum_name {
             type Error = &'static str;
             fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
                 let mut bit_offset = 0;
-                Self::parse_bits(&data, &mut bit_offset)
+                <Self as network_parser_rs::NetworkParse>::parse_bits(&data, &mut bit_offset)
             }
         }
         
@@ -1131,7 +1129,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 let mut bit_offset = 0;
-                self.write_bits(&mut buffer, &mut bit_offset);
+                network_parser_rs::NetworkParse::write_bits(self, &mut buffer, &mut bit_offset);
                 buffer
             }
         }
