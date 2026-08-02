@@ -1,12 +1,13 @@
 #![cfg_attr(not(feature="std"), no_std)]
-use core::convert::{TryFrom, From, Into};
 extern crate alloc;
 use alloc::vec::Vec;
 extern crate self as network_parser_rs;
 
-pub trait NetworkParse: Sized + TryFrom<Vec<u8>> + Into<Vec<u8>> {
-    fn parse_bits(data: &[u8], bit_offset: &mut usize) -> Result<Self, &'static str>;
-    fn write_bits(self, buffer: &mut Vec<u8>, bit_offset: &mut usize);
+pub trait NetworkParse {
+    fn parse_bits(data: &[u8], bit_offset: &mut usize) -> Result<Self, &'static str>
+    where
+        Self: Sized;
+    fn write_bits(&self, buffer: &mut Vec<u8>, bit_offset: &mut usize);
 }
 
 pub use network_parser_rs_macro::{make_struct, make_enum};
@@ -245,7 +246,49 @@ mod tests {
         let parsed7 = EthIpType::parse_bits(&data7, &mut bit_offset7).unwrap();
         assert_eq!(parsed7, EthIpType::IPv6(vec![1, 2, 3, 4, 5, 6]));
     }
-}pub mod tests_usize;
+
+    #[test]
+    fn test_dyn_network_parse() {
+        let instance = AttributeTest { field1: 42 };
+        let dyn_ref: &dyn NetworkParse = &instance;
+        let mut buffer = Vec::new();
+        let mut bit_offset = 0;
+        dyn_ref.write_bits(&mut buffer, &mut bit_offset);
+        assert_eq!(buffer, vec![42]);
+
+        let boxed: alloc::boxed::Box<dyn NetworkParse> = alloc::boxed::Box::new(AttributeTest { field1: 99 });
+        let mut buffer2 = Vec::new();
+        let mut bit_offset2 = 0;
+        boxed.write_bits(&mut buffer2, &mut bit_offset2);
+        assert_eq!(buffer2, vec![99]);
+    }
+
+    make_struct! {
+        ExcludeDynTest {
+            header: u8,
+            exclude {
+                packet: Option<alloc::boxed::Box<dyn NetworkParse>>,
+            }
+        }
+    }
+
+    #[test]
+    fn test_exclude_trait_object() {
+        let instance = ExcludeDynTest {
+            header: 0xAA,
+            packet: Some(alloc::boxed::Box::new(AttributeTest { field1: 10 })),
+        };
+        let mut buffer = Vec::new();
+        let mut bit_offset = 0;
+        instance.write_bits(&mut buffer, &mut bit_offset);
+        assert_eq!(buffer, vec![0xAA]);
+
+        let parsed = ExcludeDynTest::try_from(vec![0xAA]).unwrap();
+        assert_eq!(parsed.header, 0xAA);
+        assert!(parsed.packet.is_none());
+    }
+}
+pub mod tests_usize;
 pub mod tests_peek;
 pub mod tests_peek_multi;
 pub mod tests_eth;
