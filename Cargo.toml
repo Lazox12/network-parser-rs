@@ -3,7 +3,7 @@ members = ["network_parser_rs_macro"]
 
 [package]
 name = "network_parser_rs"
-version = "0.1.0"
+version = "1.0.1"
 edition = "2024"
 license = "MIT"
 description = "an package that enables easy parsing of networks structs just by defining them"
