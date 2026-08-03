@@ -326,7 +326,7 @@ impl SyntaxTree {
 
 
 
-                fn write_bits(&self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
+                fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
                     let mut bit_offset = *bit_offset_ref;
                     
                     let mut write_bits = |buffer: &mut Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
@@ -374,7 +374,7 @@ impl SyntaxTree {
 
 
                     #(
-                        let #struct_fields = &self.#struct_fields;
+                        let #struct_fields = self.#struct_fields.clone();
                     )*
 
                     #(#writes)*
@@ -592,7 +592,7 @@ impl Type {
             }
             Type::Custom(ty) => {
                 quote! {
-                    <#ty as network_parser_rs::NetworkParse>::write_bits(&(#accessor), &mut buffer, &mut bit_offset);
+                    <#ty as network_parser_rs::NetworkParse>::write_bits((#accessor).clone(), &mut buffer, &mut bit_offset);
                 }
             }
         }
@@ -819,7 +819,7 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 let mut bit_offset = 0;
-                network_parser_rs::NetworkParse::write_bits(&self, &mut buffer, &mut bit_offset);
+                network_parser_rs::NetworkParse::write_bits(self, &mut buffer, &mut bit_offset);
                 buffer
             }
         }
@@ -976,11 +976,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident(v as #inner)) });
-                    let write_expr = match repr_type {
-                        Type::Vec(_) | Type::CStr(_) | Type::Slice(_) | Type::Box(_) | Type::Custom(_) => quote! { v.clone() },
-                        _ => quote! { (*v) as #repr_type },
-                    };
-                    write_arms.push(quote! { Self::#ident(v) => #write_expr });
+                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type }); // Wait, v as #repr_type still casts. If it's a Vec<u8>, user shouldn't use Condition.
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident) });
@@ -990,12 +986,8 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             VariantMatch::CatchAll => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
-                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) });
-                    let write_expr = match repr_type {
-                        Type::Vec(_) | Type::CStr(_) | Type::Slice(_) | Type::Box(_) | Type::Custom(_) => quote! { v.clone() },
-                        _ => quote! { (*v) as #repr_type },
-                    };
-                    write_arms.push(quote! { Self::#ident(v) => #write_expr });
+                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) }); // same here, shouldn't use CatchAll on non primitives unless they don't care about type cast errors
+                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { _ => Ok(Self::#ident) });
@@ -1071,7 +1063,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn write_bits(&self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
+            fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
                 let tag_value = match self {
                     #(#write_arms),*
                 };
@@ -1137,7 +1129,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 let mut bit_offset = 0;
-                network_parser_rs::NetworkParse::write_bits(&self, &mut buffer, &mut bit_offset);
+                network_parser_rs::NetworkParse::write_bits(self, &mut buffer, &mut bit_offset);
                 buffer
             }
         }
