@@ -181,11 +181,11 @@ mod tests {
     make_enum! {
         #[derive(Debug, Clone, PartialEq)]
         TestEnum: u16 {
-            Field1 == 123,
-            Field2(u8) == 542,
-            Field5(Vec<u8>) = vec![1, 2, 3] if tag_value == 555,
-            Field3(u16) < 1524,
-            Field4(u16) _
+            field1 == 123,
+            field2(u8) == 542,
+            field5(Vec<u8>) = vec![1, 2, 3] if tag_value == 555,
+            field3(u16) < 1524,
+            field4(u16) _
         }
     }
 
@@ -201,39 +201,39 @@ mod tests {
     fn test_enum() {
         let mut buffer = Vec::new();
         let mut bit_offset = 0;
-        let e1 = TestEnum::Field1;
+        let e1 = TestEnum::field1;
         e1.write_bits(&mut buffer, &mut bit_offset);
         
         let mut bit_offset = 0;
         let parsed = TestEnum::parse_bits(&buffer, &mut bit_offset).unwrap();
-        assert_eq!(parsed, TestEnum::Field1);
+        assert_eq!(parsed, TestEnum::field1);
         
         let mut buffer2 = Vec::new();
         let mut bit_offset2 = 0;
-        let e2 = TestEnum::Field2(0); // it initialized with T::Default in parsing but we explicitly set 0 here
+        let e2 = TestEnum::field2(0); // it initialized with T::Default in parsing but we explicitly set 0 here
         e2.write_bits(&mut buffer2, &mut bit_offset2);
         
         let mut bit_offset2 = 0;
         let parsed2 = TestEnum::parse_bits(&buffer2, &mut bit_offset2).unwrap();
-        assert_eq!(parsed2, TestEnum::Field2(0)); // it returns T::Default which is 0 for u8
+        assert_eq!(parsed2, TestEnum::field2(0)); // it returns T::Default which is 0 for u8
         
         let mut buffer3 = Vec::new();
         let mut bit_offset3 = 0;
-        let e3 = TestEnum::Field3(1000); // 1000 < 1524
+        let e3 = TestEnum::field3(1000); // 1000 < 1524
         e3.write_bits(&mut buffer3, &mut bit_offset3);
         
         let mut bit_offset3 = 0;
         let parsed3 = TestEnum::parse_bits(&buffer3, &mut bit_offset3).unwrap();
-        assert_eq!(parsed3, TestEnum::Field3(1000));
+        assert_eq!(parsed3, TestEnum::field3(1000));
         
         let mut buffer4 = Vec::new();
         let mut bit_offset4 = 0;
-        let e4 = TestEnum::Field4(2000); // >= 1524, so it falls to catch-all
+        let e4 = TestEnum::field4(2000); // >= 1524, so it falls to catch-all
         e4.write_bits(&mut buffer4, &mut bit_offset4);
         
         let mut bit_offset4 = 0;
         let parsed4 = TestEnum::parse_bits(&buffer4, &mut bit_offset4).unwrap();
-        assert_eq!(parsed4, TestEnum::Field4(2000));
+        assert_eq!(parsed4, TestEnum::field4(2000));
         
         // Test Vec<u8> as repr_type
         let data6 = vec![1, 2, 3, 4];

@@ -4,6 +4,7 @@ use alloc::{vec,format};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use alloc::slice;
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};

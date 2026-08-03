@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 make_struct! { TestPeek {
     field1: u16,
     if peek(16) == 0x8100 {
-        _field2: u16,
+        field2: u16,
     }
 }}
 
