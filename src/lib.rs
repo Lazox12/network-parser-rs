@@ -1,12 +1,15 @@
 #![cfg_attr(not(feature="std"), no_std)]
-use core::convert::{TryFrom, From, Into};
-extern crate alloc;
-use alloc::vec::Vec;
+pub extern crate alloc;
+pub use alloc::vec::Vec;
+pub use alloc::boxed::Box;
+pub use alloc::ffi::CString;
+
+use core::convert::{TryFrom, Into};
 extern crate self as network_parser_rs;
 
-pub trait NetworkParse: Sized + TryFrom<Vec<u8>> + Into<Vec<u8>> {
-    fn parse_bits(data: &[u8], bit_offset: &mut usize) -> Result<Self, &'static str>;
-    fn write_bits(self, buffer: &mut Vec<u8>, bit_offset: &mut usize);
+pub trait NetworkParse<'a>: Sized + TryFrom<alloc::vec::Vec<u8>> + TryFrom<&'a[u8]> + Into<alloc::vec::Vec<u8>> {
+    fn parse_bits(data: &[u8], bit_offset: &mut usize) -> core::result::Result<Self, &'static str>;
+    fn write_bits(&self, buffer: &mut alloc::vec::Vec<u8>, bit_offset: &mut usize);
 }
 
 pub use network_parser_rs_macro::{make_struct, make_enum};
@@ -135,9 +138,8 @@ mod tests {
         };
         let mut buffer = Vec::new();
         let mut bit_offset = 0;
-        instance.clone().write_bits(&mut buffer, &mut bit_offset);
+        instance.write_bits(&mut buffer, &mut bit_offset);
         
-        let mut read_offset = 0;
         let parsed = BoxTest::try_from(buffer).unwrap();
         assert_eq!(parsed, instance);
     }
@@ -163,7 +165,7 @@ mod tests {
         
         let mut buffer = Vec::new();
         let mut bit_offset = 0;
-        instance.clone().write_bits(&mut buffer, &mut bit_offset);
+        instance.write_bits(&mut buffer, &mut bit_offset);
         
         // Only normal_field should be serialized (1 byte)
         assert_eq!(buffer.len(), 1);
@@ -245,7 +247,89 @@ mod tests {
         let parsed7 = EthIpType::parse_bits(&data7, &mut bit_offset7).unwrap();
         assert_eq!(parsed7, EthIpType::IPv6(vec![1, 2, 3, 4, 5, 6]));
     }
-}pub mod tests_usize;
+
+    make_struct! {
+        #[derive(Debug, PartialEq)]
+        ExprVecTest {
+            ihl: u8,
+            options: Vec<u8>; (ihl as usize * 4) - 20,
+            payload: Vec<u8>,
+        }
+    }
+
+    #[test]
+    fn test_vec_expression_size() {
+        // ihl = 6 => options length = 6 * 4 - 20 = 4 bytes
+        let mut data = vec![6]; // ihl = 6
+        data.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]); // options (4 bytes)
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // payload (3 bytes)
+
+        let mut bit_offset = 0;
+        let packet = ExprVecTest::parse_bits(&data, &mut bit_offset).unwrap();
+        assert_eq!(packet.ihl, 6);
+        assert_eq!(packet.options, vec![0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(packet.payload, vec![0xAA, 0xBB, 0xCC]);
+
+        let serialized: Vec<u8> = packet.into();
+        assert_eq!(serialized, data);
+    }
+
+    #[test]
+    fn test_write_bits_by_ref() {
+        let instance = BoxTest {
+            boxed_field: alloc::boxed::Box::new(BoxTestInner { inner_field: 99 }),
+        };
+        let mut buffer1 = Vec::new();
+        let mut offset1 = 0;
+        instance.write_bits(&mut buffer1, &mut offset1);
+
+        // Can serialize multiple times without clone or move
+        let mut buffer2 = Vec::new();
+        let mut offset2 = 0;
+        instance.write_bits(&mut buffer2, &mut offset2);
+        assert_eq!(buffer1, buffer2);
+
+        let vec_from_ref: Vec<u8> = Vec::from(&instance);
+        assert_eq!(vec_from_ref, buffer1);
+    }
+
+    mod no_imports_test {
+        use crate::make_struct;
+
+        make_struct! {
+            icmp_packet {
+                aa: u8,
+            }
+        }
+
+        make_struct! {
+            #[derive(Default, Debug)]
+            pub ipv4_packet {
+                /// Header version
+                pub header: u4,
+                /// Header length
+                pub ihl: u4, // len = ihl*4
+                pub dscp: u6;
+                pub ecn: u2;
+                pub total_length: u16,
+                pub identification: u16,
+                pub flags: u3,
+                pub frag_offset: u13,
+                pub ttl: u8,
+                pub protocol: u8,
+                pub checksum: u16,
+                pub source_ip: u32,
+                pub destination_ip: u32,
+                pub options: Vec<u8>; (ihl as usize * 4) - 20,
+                pub payload: Vec<u8>,
+                exclude {
+                    pub l4_data: Option<Box<u32>>;
+                };
+            }
+        }
+    }
+}
+pub mod tests_usize;
 pub mod tests_peek;
 pub mod tests_peek_multi;
 pub mod tests_eth;

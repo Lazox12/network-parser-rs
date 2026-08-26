@@ -4,38 +4,20 @@ use alloc::{vec,format};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
-use alloc::slice;
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{Expr, LitInt, Ident};
 use syn::parse::{Parse, ParseStream};
-/*
-syntax:
-
-
-make_struct! { MyStruct,
-    field1: u3,
-    consume(5) //skips 5 bytes
-    field2: u5,
-    field3: Vec<u8>;field1, // vec of size defined in field1
-    field4: CStr,
-    if peek(u8)==15{
-        field5: u16,
-        //field 5 will be defined as Option<u16> filled only when the next two bytes are 15
-    }
-    field6: [u8;4],
-}
-*/
-
-
+use syn::spanned::Spanned;
+use syn::ext::IdentExt;
 
 enum Type{
     UInt(u8),
     Int(u8),
     Bool,
     USize,
-    Vec(Option<Ident>), //identifier of the size field
+    Vec(Option<syn::Expr>), // expression for the size in bytes
     CStr(()),
     Slice(u8),
     Optional(OptionType), // field defined behind if condition
@@ -147,12 +129,12 @@ impl ToTokens for Type {
             }
             Type::Box(inner) => {
                 let inner_tokens = quote!(#inner);
-                tokens.extend(quote!(Box<#inner_tokens>));
+                tokens.extend(quote!(alloc::boxed::Box<#inner_tokens>));
             }
             Type::Exclude(inner) => {
                 inner.to_tokens(tokens);
             }
-            Type::Vec(_) => { tokens.extend(quote!(Vec<u8>)); }
+            Type::Vec(_) => { tokens.extend(quote!(alloc::vec::Vec<u8>)); }
             Type::CStr(_) => { tokens.extend(quote!(alloc::ffi::CString)); }
             Type::Slice(len) => {
                 let len_lit = proc_macro2::Literal::u8_unsuffixed(*len);
@@ -160,7 +142,7 @@ impl ToTokens for Type {
             }
             Type::Optional(opt) => {
                 let inner_ty = opt.ty.first().unwrap();
-                tokens.extend(quote!(Option<#inner_ty>));
+                tokens.extend(quote!(core::option::Option<#inner_ty>));
             }
             Type::Custom(ty) => {
                 tokens.extend(quote!(#ty));
@@ -271,11 +253,11 @@ impl SyntaxTree {
 
         quote! {
             impl network_parser_rs::NetworkParse for #struct_name {
-                fn parse_bits(data: &[u8], mut bit_offset_ref: &mut usize) -> Result<Self, &'static str> {
+                fn parse_bits(data: &[u8], mut bit_offset_ref: &mut usize) -> core::result::Result<Self, &'static str> {
                     // Create a local alias for macro logic which uses `bit_offset`
                     let mut bit_offset = *bit_offset_ref;
                     
-                    let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> Result<u64, &'static str> {
+                    let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> core::result::Result<u64, &'static str> {
                         if *bit_offset + bits > data.len() * 8 {
                             return Err("EOF");
                         }
@@ -326,10 +308,10 @@ impl SyntaxTree {
 
 
 
-                fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
+                fn write_bits(&self, mut buffer: &mut alloc::vec::Vec<u8>, mut bit_offset_ref: &mut usize) {
                     let mut bit_offset = *bit_offset_ref;
                     
-                    let mut write_bits = |buffer: &mut Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
+                    let mut write_bits = |buffer: &mut alloc::vec::Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
                         if *bit_offset % 8 == 0 {
                             let byte_idx = *bit_offset / 8;
                             if bits == 8 {
@@ -440,11 +422,11 @@ impl Type {
                 }
             }
             Type::Vec(size_opt) => {
-                if let Some(size_field) = size_opt {
+                if let Some(size_expr) = size_opt {
                     quote! {
                         if bit_offset % 8 != 0 { return Err("Unaligned byte read for Vec"); }
                         let byte_offset = bit_offset / 8;
-                        let len = #size_field as usize;
+                        let len = (#size_expr) as usize;
                         if byte_offset + len > data.len() { return Err("EOF"); }
                         let #ident = data[byte_offset .. byte_offset + len].to_vec();
                         bit_offset += len * 8;
@@ -502,12 +484,12 @@ impl Type {
                 let inner_parse = inner.generate_parse_code(&temp_ident);
                 quote! {
                     #inner_parse
-                    let #ident = Box::new(#temp_ident);
+                    let #ident = alloc::boxed::Box::new(#temp_ident);
                 }
             }
             Type::Exclude(_) => {
                 quote! {
-                    let #ident = Default::default();
+                    let #ident = core::default::Default::default();
                 }
             }
             Type::Custom(ty) => {
@@ -592,7 +574,7 @@ impl Type {
             }
             Type::Custom(ty) => {
                 quote! {
-                    <#ty as network_parser_rs::NetworkParse>::write_bits((#accessor).clone(), &mut buffer, &mut bit_offset);
+                    <#ty as network_parser_rs::NetworkParse>::write_bits(&(#accessor), &mut buffer, &mut bit_offset);
                 }
             }
         }
@@ -649,9 +631,8 @@ impl Parse for Type {
                 let mut size_field = None;
                 if input.peek(syn::Token![;]) {
                     input.parse::<syn::Token![;]>()?;
-                    if let Ok(ident) = input.parse::<Ident>() {
-                        size_field = Some(ident);
-                    }
+                    let expr: Expr = input.parse()?;
+                    size_field = Some(expr);
                 }
                 return Ok(Type::Vec(size_field));
             } else if ident_str == "Option" {
@@ -694,7 +675,8 @@ impl Parse for Type {
 impl Parse for SyntaxTree {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let attrs = input.call(syn::Attribute::parse_outer)?;
-        let struct_name: Ident = input.parse()?;
+        let _vis = input.parse::<syn::Visibility>()?;
+        let struct_name = Ident::parse_any(input)?;
         
         let struct_content;
         syn::braced!(struct_content in input);
@@ -703,6 +685,8 @@ impl Parse for SyntaxTree {
 
         while !struct_content.is_empty() {
             let input = &struct_content;
+            let _field_attrs = input.call(syn::Attribute::parse_outer)?;
+
             if input.peek(syn::Token![if]) {
                 input.parse::<syn::Token![if]>()?;
                 let condition = input.parse::<Expr>()?;
@@ -713,28 +697,39 @@ impl Parse for SyntaxTree {
                 // Fields inside the if block are wrapped in Type::Optional
                 let mut if_rows = Vec::new();
                 while !content.is_empty() {
+                    let _inner_attrs = content.call(syn::Attribute::parse_outer)?;
+                    let _vis = content.parse::<syn::Visibility>()?;
+
                     let fork = content.fork();
-                    if let Ok(ident) = fork.parse::<Ident>() {
+                    if let Ok(ident) = Ident::parse_any(&fork) {
                         if ident.to_string() == "consume" {
-                            content.parse::<Ident>()?; // consume
+                            Ident::parse_any(&content)?; // consume
                             let inner_content;
                             syn::parenthesized!(inner_content in content);
                             let consume_type: ConsumeType = inner_content.parse()?;
                             if_rows.push(Row::Consume(consume_type));
                             
-                            if content.peek(syn::Token![,]) {
-                                content.parse::<syn::Token![,]>()?;
+                            while content.peek(syn::Token![,]) || content.peek(syn::Token![;]) {
+                                if content.peek(syn::Token![,]) {
+                                    content.parse::<syn::Token![,]>()?;
+                                } else {
+                                    content.parse::<syn::Token![;]>()?;
+                                }
                             }
                             continue;
                         }
                     }
 
-                    let identifier: Ident = content.parse()?;
+                    let identifier = Ident::parse_any(&content)?;
                     content.parse::<syn::Token![:]>()?;
                     let ty: Type = content.parse()?;
                     
-                    if content.peek(syn::Token![,]) {
-                        content.parse::<syn::Token![,]>()?;
+                    while content.peek(syn::Token![,]) || content.peek(syn::Token![;]) {
+                        if content.peek(syn::Token![,]) {
+                            content.parse::<syn::Token![,]>()?;
+                        } else {
+                            content.parse::<syn::Token![;]>()?;
+                        }
                     }
                     
                     if_rows.push(Row::Field(Field {
@@ -743,18 +738,24 @@ impl Parse for SyntaxTree {
                     }));
                 }
                 inner.push(Row::IfBlock { condition: quote!(#condition), rows: if_rows });
-            } else if input.peek(syn::Ident) && input.fork().parse::<Ident>().unwrap().to_string() == "exclude" {
+            } else if input.peek(syn::Ident) && input.fork().parse::<Ident>().map(|id| id.to_string() == "exclude").unwrap_or(false) {
                 input.parse::<Ident>()?; // exclude
                 let content;
                 syn::braced!(content in input);
                 
                 while !content.is_empty() {
-                    let identifier: Ident = content.parse()?;
+                    let _inner_attrs = content.call(syn::Attribute::parse_outer)?;
+                    let _vis = content.parse::<syn::Visibility>()?;
+                    let identifier = Ident::parse_any(&content)?;
                     content.parse::<syn::Token![:]>()?;
                     let ty: Type = content.parse()?;
                     
-                    if content.peek(syn::Token![,]) {
-                        content.parse::<syn::Token![,]>()?;
+                    while content.peek(syn::Token![,]) || content.peek(syn::Token![;]) {
+                        if content.peek(syn::Token![,]) {
+                            content.parse::<syn::Token![,]>()?;
+                        } else {
+                            content.parse::<syn::Token![;]>()?;
+                        }
                     }
                     
                     inner.push(Row::Field(Field {
@@ -762,30 +763,37 @@ impl Parse for SyntaxTree {
                         ty: Type::Exclude(Box::new(ty)),
                     }));
                 }
-            } else if input.fork().parse::<Ident>().is_ok() {
-                let fork = input.fork();
-                let ident: Ident = fork.parse()?;
-                
-                if ident.to_string() == "consume" {
-                    input.parse::<Ident>()?; // consume
-                    let content;
-                    syn::parenthesized!(content in input);
-                    let consume_type: ConsumeType = content.parse()?;
-                    inner.push(Row::Consume(consume_type));
-                } else {
-                    let identifier: Ident = input.parse()?;
-                    input.parse::<syn::Token![:]>()?;
-                    let ty: Type = input.parse()?;
-                    inner.push(Row::Field(Field { identifier, ty }));
-                }
             } else {
-                return Err(input.error("Expected a field definition (e.g. `field: u8`), a `consume(N)` directive, or an `if` block"));
+                let _vis = input.parse::<syn::Visibility>()?;
+                let fork = input.fork();
+                if let Ok(ident) = Ident::parse_any(&fork) {
+                    if ident.to_string() == "consume" {
+                        Ident::parse_any(input)?; // consume
+                        let content;
+                        syn::parenthesized!(content in input);
+                        let consume_type: ConsumeType = content.parse()?;
+                        inner.push(Row::Consume(consume_type));
+                    } else {
+                        let identifier = Ident::parse_any(input)?;
+                        input.parse::<syn::Token![:]>()?;
+                        let ty: Type = input.parse()?;
+                        inner.push(Row::Field(Field { identifier, ty }));
+                    }
+                } else {
+                    return Err(input.error("Expected a field definition (e.g. `field: u8`), a `consume(N)` directive, or an `if` block"));
+                }
             }
 
-            if input.peek(syn::Token![,]) {
-                input.parse::<syn::Token![,]>()?;
+            while input.peek(syn::Token![,]) || input.peek(syn::Token![;]) {
+                if input.peek(syn::Token![,]) {
+                    input.parse::<syn::Token![,]>()?;
+                } else {
+                    input.parse::<syn::Token![;]>()?;
+                }
             }
         }
+
+        validate_unsized_vecs(&inner)?;
 
         Ok(SyntaxTree {
             attrs,
@@ -793,6 +801,92 @@ impl Parse for SyntaxTree {
             struct_name: struct_name.to_string(),
         })
     }
+}
+
+fn validate_unsized_vecs(rows: &[Row]) -> syn::Result<()> {
+    let mut unsized_vec_ident: Option<Ident> = None;
+
+    fn check_field(ident: &Ident, ty: &Type, unsized_vec_ident: &mut Option<Ident>) -> syn::Result<()> {
+        match ty {
+            Type::Exclude(_) => {
+                // Excluded fields do not consume bytes from the packet, so they are allowed after an unsized Vec
+            }
+            Type::Vec(None) => {
+                if let Some(prev) = unsized_vec_ident {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!(
+                            "Cannot define unsized `Vec<u8>` field `{}` because field `{}` is already an unsized `Vec<u8>`. Only one `Vec<u8>` of unspecified size is allowed per struct.",
+                            ident, prev
+                        ),
+                    ));
+                }
+                *unsized_vec_ident = Some(ident.clone());
+            }
+            _ => {
+                if let Some(prev) = unsized_vec_ident {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!(
+                            "Field `{}` cannot follow unsized `Vec<u8>` field `{}`. A `Vec<u8>` of unspecified size consumes all remaining data and must be the last parseable field in the struct.",
+                            ident, prev
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    for row in rows {
+        match row {
+            Row::Field(f) => {
+                check_field(&f.identifier, &f.ty, &mut unsized_vec_ident)?;
+            }
+            Row::Consume(c) => {
+                if let Some(prev) = &unsized_vec_ident {
+                    let span = match c {
+                        ConsumeType::Literal(lit) => lit.span(),
+                        ConsumeType::Expr(expr) => expr.span(),
+                    };
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "`consume` directive cannot follow unsized `Vec<u8>` field `{}`.",
+                            prev
+                        ),
+                    ));
+                }
+            }
+            Row::IfBlock { rows: if_rows, .. } => {
+                for if_row in if_rows {
+                    match if_row {
+                        Row::Field(f) => {
+                            check_field(&f.identifier, &f.ty, &mut unsized_vec_ident)?;
+                        }
+                        Row::Consume(c) => {
+                            if let Some(prev) = &unsized_vec_ident {
+                                let span = match c {
+                                    ConsumeType::Literal(lit) => lit.span(),
+                                    ConsumeType::Expr(expr) => expr.span(),
+                                };
+                                return Err(syn::Error::new(
+                                    span,
+                                    format!(
+                                        "`consume` directive cannot follow unsized `Vec<u8>` field `{}`.",
+                                        prev
+                                    ),
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[proc_macro]
@@ -807,19 +901,28 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
         
         #network_parse_impl
         
-        impl core::convert::TryFrom<Vec<u8>> for #struct_name {
+        impl core::convert::TryFrom<alloc::vec::Vec<u8>> for #struct_name {
             type Error = &'static str;
-            fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
+            fn try_from(data: alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> {
                 let mut bit_offset = 0;
                 <Self as network_parser_rs::NetworkParse>::parse_bits(&data, &mut bit_offset)
             }
         }
         
-        impl core::convert::Into<Vec<u8>> for #struct_name {
-            fn into(self) -> Vec<u8> {
-                let mut buffer = Vec::new();
+        impl core::convert::From<#struct_name> for alloc::vec::Vec<u8> {
+            fn from(val: #struct_name) -> alloc::vec::Vec<u8> {
+                let mut buffer = alloc::vec::Vec::new();
                 let mut bit_offset = 0;
-                network_parser_rs::NetworkParse::write_bits(self, &mut buffer, &mut bit_offset);
+                network_parser_rs::NetworkParse::write_bits(&val, &mut buffer, &mut bit_offset);
+                buffer
+            }
+        }
+
+        impl<'a> core::convert::From<&'a #struct_name> for alloc::vec::Vec<u8> {
+            fn from(val: &'a #struct_name) -> alloc::vec::Vec<u8> {
+                let mut buffer = alloc::vec::Vec::new();
+                let mut bit_offset = 0;
+                network_parser_rs::NetworkParse::write_bits(val, &mut buffer, &mut bit_offset);
                 buffer
             }
         }
@@ -868,7 +971,8 @@ struct EnumDef {
 impl syn::parse::Parse for EnumDef {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let attrs = input.call(syn::Attribute::parse_outer)?;
-        let enum_name: Ident = input.parse()?;
+        let _vis = input.parse::<syn::Visibility>()?;
+        let enum_name = Ident::parse_any(input)?;
         input.parse::<syn::Token![:]>()?;
         let repr_type: Type = input.parse()?;
         
@@ -878,7 +982,8 @@ impl syn::parse::Parse for EnumDef {
         let mut variants = Vec::new();
         while !struct_content.is_empty() {
             let input = &struct_content;
-            let ident: Ident = input.parse()?;
+            let _variant_attrs = input.call(syn::Attribute::parse_outer)?;
+            let ident = Ident::parse_any(input)?;
             
             let inner_type = if input.peek(syn::token::Paren) {
                 let content;
@@ -894,7 +999,7 @@ impl syn::parse::Parse for EnumDef {
             } else if input.peek(syn::Token![=]) {
                 input.parse::<syn::Token![=]>()?;
                 let mut expr_tokens = proc_macro2::TokenStream::new();
-                while !input.is_empty() && !input.peek(syn::Token![if]) && !input.peek(syn::Token![,]) {
+                while !input.is_empty() && !input.peek(syn::Token![if]) && !input.peek(syn::Token![,]) && !input.peek(syn::Token![;]) {
                     let tt: proc_macro2::TokenTree = input.parse()?;
                     expr_tokens.extend(core::iter::once(tt));
                 }
@@ -905,7 +1010,7 @@ impl syn::parse::Parse for EnumDef {
                 let mut cond_tokens = proc_macro2::TokenStream::new();
                 if input.peek(syn::Token![if]) {
                     input.parse::<syn::Token![if]>()?;
-                    while !input.is_empty() && !input.peek(syn::Token![,]) {
+                    while !input.is_empty() && !input.peek(syn::Token![,]) && !input.peek(syn::Token![;]) {
                         let tt: proc_macro2::TokenTree = input.parse()?;
                         cond_tokens.extend(core::iter::once(tt));
                     }
@@ -918,15 +1023,19 @@ impl syn::parse::Parse for EnumDef {
                 VariantMatch::CatchAll
             } else {
                 let mut cond = proc_macro2::TokenStream::new();
-                while !input.is_empty() && !input.peek(syn::Token![,]) {
+                while !input.is_empty() && !input.peek(syn::Token![,]) && !input.peek(syn::Token![;]) {
                     let tt: proc_macro2::TokenTree = input.parse()?;
                     cond.extend(core::iter::once(tt));
                 }
                 VariantMatch::Condition(replace_self_with_tag_value(cond))
             };
             
-            if input.peek(syn::Token![,]) {
-                input.parse::<syn::Token![,]>()?;
+            while input.peek(syn::Token![,]) || input.peek(syn::Token![;]) {
+                if input.peek(syn::Token![,]) {
+                    input.parse::<syn::Token![,]>()?;
+                } else {
+                    input.parse::<syn::Token![;]>()?;
+                }
             }
             
             variants.push(EnumVariant { ident, inner_type, variant_match });
@@ -946,6 +1055,11 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
     let mut match_arms = Vec::new();
     let mut write_arms = Vec::new();
     
+    let write_val = match repr_type {
+        Type::UInt(_) | Type::Int(_) | Type::USize => quote! { (core::clone::Clone::clone(v)) as #repr_type },
+        _ => quote! { core::clone::Clone::clone(v) },
+    };
+
     for variant in &parsed.variants {
         let ident = &variant.ident;
         
@@ -953,7 +1067,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             VariantMatch::Exact(value) => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
-                    match_arms.push(quote! { #value => Ok(Self::#ident(Default::default())) });
+                    match_arms.push(quote! { #value => Ok(Self::#ident(core::default::Default::default())) });
                     write_arms.push(quote! { Self::#ident(_) => #value });
                 } else {
                     enum_variants.push(quote! { #ident });
@@ -965,33 +1079,33 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { _ if #cond => Ok(Self::#ident(#expr)) });
-                    write_arms.push(quote! { Self::#ident(_) => Default::default() }); // Fallback on serialize
+                    write_arms.push(quote! { Self::#ident(_) => core::default::Default::default() }); // Fallback on serialize
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { _ if #cond => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => Default::default() });
+                    write_arms.push(quote! { Self::#ident => core::default::Default::default() });
                 }
             }
             VariantMatch::Condition(cond) => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident(v as #inner)) });
-                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type }); // Wait, v as #repr_type still casts. If it's a Vec<u8>, user shouldn't use Condition.
+                    write_arms.push(quote! { Self::#ident(v) => #write_val });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => Default::default() });
+                    write_arms.push(quote! { Self::#ident => core::default::Default::default() });
                 }
             }
             VariantMatch::CatchAll => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
-                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) }); // same here, shouldn't use CatchAll on non primitives unless they don't care about type cast errors
-                    write_arms.push(quote! { Self::#ident(v) => v as #repr_type });
+                    match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) });
+                    write_arms.push(quote! { Self::#ident(v) => #write_val });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { _ => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => Default::default() });
+                    write_arms.push(quote! { Self::#ident => core::default::Default::default() });
                 }
             }
         }
@@ -1012,9 +1126,9 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
         }
         
         impl network_parser_rs::NetworkParse for #enum_name {
-            fn parse_bits(data: &[u8], bit_offset_ref: &mut usize) -> Result<Self, &'static str> {
+            fn parse_bits(data: &[u8], bit_offset_ref: &mut usize) -> core::result::Result<Self, &'static str> {
                 let mut bit_offset = *bit_offset_ref;
-                let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> Result<u64, &'static str> {
+                let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> core::result::Result<u64, &'static str> {
                     if *bit_offset + bits > data.len() * 8 {
                         return Err("EOF");
                     }
@@ -1063,13 +1177,13 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn write_bits(self, mut buffer: &mut Vec<u8>, mut bit_offset_ref: &mut usize) {
+            fn write_bits(&self, mut buffer: &mut alloc::vec::Vec<u8>, mut bit_offset_ref: &mut usize) {
                 let tag_value = match self {
                     #(#write_arms),*
                 };
 
                 let mut bit_offset = *bit_offset_ref;
-                let mut write_bits = |buffer: &mut Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
+                let mut write_bits = |buffer: &mut alloc::vec::Vec<u8>, bit_offset: &mut usize, bits: usize, val: u64| {
                     if *bit_offset % 8 == 0 {
                         let byte_idx = *bit_offset / 8;
                         if bits == 8 {
@@ -1117,19 +1231,28 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             }
         }
         
-        impl core::convert::TryFrom<Vec<u8>> for #enum_name {
+        impl core::convert::TryFrom<alloc::vec::Vec<u8>> for #enum_name {
             type Error = &'static str;
-            fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
+            fn try_from(data: alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> {
                 let mut bit_offset = 0;
                 <Self as network_parser_rs::NetworkParse>::parse_bits(&data, &mut bit_offset)
             }
         }
         
-        impl core::convert::Into<Vec<u8>> for #enum_name {
-            fn into(self) -> Vec<u8> {
-                let mut buffer = Vec::new();
+        impl core::convert::From<#enum_name> for alloc::vec::Vec<u8> {
+            fn from(val: #enum_name) -> alloc::vec::Vec<u8> {
+                let mut buffer = alloc::vec::Vec::new();
                 let mut bit_offset = 0;
-                network_parser_rs::NetworkParse::write_bits(self, &mut buffer, &mut bit_offset);
+                network_parser_rs::NetworkParse::write_bits(&val, &mut buffer, &mut bit_offset);
+                buffer
+            }
+        }
+
+        impl<'a> core::convert::From<&'a #enum_name> for alloc::vec::Vec<u8> {
+            fn from(val: &'a #enum_name) -> alloc::vec::Vec<u8> {
+                let mut buffer = alloc::vec::Vec::new();
+                let mut bit_offset = 0;
+                network_parser_rs::NetworkParse::write_bits(val, &mut buffer, &mut bit_offset);
                 buffer
             }
         }
