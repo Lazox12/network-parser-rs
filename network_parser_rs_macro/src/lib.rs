@@ -252,7 +252,7 @@ impl SyntaxTree {
         }
 
         quote! {
-            impl network_parser_rs::NetworkParse for #struct_name {
+            impl<'a> network_parser_rs::NetworkParse<'a> for #struct_name {
                 fn parse_bits(data: &[u8], mut bit_offset_ref: &mut usize) -> core::result::Result<Self, &'static str> {
                     // Create a local alias for macro logic which uses `bit_offset`
                     let mut bit_offset = *bit_offset_ref;
@@ -908,6 +908,14 @@ pub fn make_struct(input: TokenStream) -> TokenStream {
                 <Self as network_parser_rs::NetworkParse>::parse_bits(&data, &mut bit_offset)
             }
         }
+
+        impl<'a> core::convert::TryFrom<&'a [u8]> for #struct_name {
+            type Error = &'static str;
+            fn try_from(data: &'a [u8]) -> core::result::Result<Self, Self::Error> {
+                let mut bit_offset = 0;
+                <Self as network_parser_rs::NetworkParse>::parse_bits(data, &mut bit_offset)
+            }
+        }
         
         impl core::convert::From<#struct_name> for alloc::vec::Vec<u8> {
             fn from(val: #struct_name) -> alloc::vec::Vec<u8> {
@@ -1125,7 +1133,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             #(#enum_variants),*
         }
         
-        impl network_parser_rs::NetworkParse for #enum_name {
+        impl<'a> network_parser_rs::NetworkParse<'a> for #enum_name {
             fn parse_bits(data: &[u8], bit_offset_ref: &mut usize) -> core::result::Result<Self, &'static str> {
                 let mut bit_offset = *bit_offset_ref;
                 let read_bits = |data: &[u8], bit_offset: &mut usize, bits: usize| -> core::result::Result<u64, &'static str> {
@@ -1236,6 +1244,14 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
             fn try_from(data: alloc::vec::Vec<u8>) -> core::result::Result<Self, Self::Error> {
                 let mut bit_offset = 0;
                 <Self as network_parser_rs::NetworkParse>::parse_bits(&data, &mut bit_offset)
+            }
+        }
+
+        impl<'a> core::convert::TryFrom<&'a [u8]> for #enum_name {
+            type Error = &'static str;
+            fn try_from(data: &'a [u8]) -> core::result::Result<Self, Self::Error> {
+                let mut bit_offset = 0;
+                <Self as network_parser_rs::NetworkParse>::parse_bits(data, &mut bit_offset)
             }
         }
         
