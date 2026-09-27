@@ -31,17 +31,12 @@ struct OptionType{
 }
 
 enum ConsumeType{
-    Literal(LitInt),
     Expr(Expr),
 }
 
 impl Parse for ConsumeType {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        if input.peek(LitInt) {
-            Ok(ConsumeType::Literal(input.parse()?))
-        } else {
-            Ok(ConsumeType::Expr(input.parse()?))
-        }
+        Ok(ConsumeType::Expr(input.parse()?))
     }
 }
 
@@ -163,12 +158,18 @@ impl SyntaxTree {
             match row {
                 Row::Consume(c) => {
                     let amount = match c {
-                        ConsumeType::Literal(lit) => quote!(#lit as usize),
                         ConsumeType::Expr(expr) => quote!((#expr) as usize),
                     };
                     let consume_stmt = quote! { bit_offset += #amount; };
                     try_from_reads.push(consume_stmt);
-                    writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
+                    writes.push(quote! {
+                        let mut remaining = #amount;
+                        while remaining > 0 {
+                            let step = if remaining > 64 { 64 } else { remaining };
+                            write_bits(&mut buffer, &mut bit_offset, step, 0);
+                            remaining -= step;
+                        }
+                    });
                 }
                 Row::IfBlock { condition, rows } => {
                     let mut block_reads = Vec::new();
@@ -203,11 +204,17 @@ impl SyntaxTree {
                             }
                             Row::Consume(c) => {
                                 let amount = match c {
-                                    ConsumeType::Literal(lit) => quote!(#lit as usize),
                                     ConsumeType::Expr(expr) => quote!((#expr) as usize),
                                 };
                                 block_reads.push(quote! { bit_offset += #amount; });
-                                block_writes.push(quote! { write_bits(&mut buffer, &mut bit_offset, #amount, 0); });
+                                block_writes.push(quote! {
+                                    let mut remaining = #amount;
+                                    while remaining > 0 {
+                                        let step = if remaining > 64 { 64 } else { remaining };
+                                        write_bits(&mut buffer, &mut bit_offset, step, 0);
+                                        remaining -= step;
+                                    }
+                                });
                             }
                             _ => {}
                         }
@@ -531,24 +538,39 @@ impl Type {
             Type::Slice(len) => {
                 let len_lit = proc_macro2::Literal::u8_unsuffixed(*len);
                 quote! {
-                    if bit_offset % 8 != 0 { panic!("Unaligned byte write for slice"); }
-                    buffer.extend_from_slice(&(#accessor));
-                    bit_offset += (#len_lit as usize) * 8;
+                    if bit_offset % 8 != 0 {
+                        for &b in (#accessor).iter() {
+                            write_bits(&mut buffer, &mut bit_offset, 8, b as u64);
+                        }
+                    } else {
+                        buffer.extend_from_slice(&(#accessor));
+                        bit_offset += (#len_lit as usize) * 8;
+                    }
                 }
             }
             Type::Vec(_) => {
                 quote! {
-                    if bit_offset % 8 != 0 { panic!("Unaligned byte write for Vec"); }
-                    buffer.extend_from_slice(&(#accessor));
-                    bit_offset += (#accessor).len() * 8;
+                    if bit_offset % 8 != 0 {
+                        for &b in (#accessor).iter() {
+                            write_bits(&mut buffer, &mut bit_offset, 8, b as u64);
+                        }
+                    } else {
+                        buffer.extend_from_slice(&(#accessor));
+                        bit_offset += (#accessor).len() * 8;
+                    }
                 }
             }
             Type::CStr(_) => {
                 quote! {
-                    if bit_offset % 8 != 0 { panic!("Unaligned byte write for CStr"); }
                     let bytes = (#accessor).as_bytes_with_nul();
-                    buffer.extend_from_slice(bytes);
-                    bit_offset += bytes.len() * 8;
+                    if bit_offset % 8 != 0 {
+                        for &b in bytes.iter() {
+                            write_bits(&mut buffer, &mut bit_offset, 8, b as u64);
+                        }
+                    } else {
+                        buffer.extend_from_slice(bytes);
+                        bit_offset += bytes.len() * 8;
+                    }
                 }
             }
             Type::Optional(opt) => {
@@ -704,9 +726,17 @@ impl Parse for SyntaxTree {
                     if let Ok(ident) = Ident::parse_any(&fork) {
                         if ident.to_string() == "consume" {
                             Ident::parse_any(&content)?; // consume
-                            let inner_content;
-                            syn::parenthesized!(inner_content in content);
-                            let consume_type: ConsumeType = inner_content.parse()?;
+                            let consume_type: ConsumeType = if content.peek(syn::token::Paren) {
+                                let inner_content;
+                                syn::parenthesized!(inner_content in content);
+                                inner_content.parse()?
+                            } else if content.peek(syn::Token![;]) {
+                                content.parse::<syn::Token![;]>()?;
+                                let expr: Expr = content.parse()?;
+                                ConsumeType::Expr(expr)
+                            } else {
+                                return Err(content.error("Expected `consume(expr)` or `consume; expr`"));
+                            };
                             if_rows.push(Row::Consume(consume_type));
                             
                             while content.peek(syn::Token![,]) || content.peek(syn::Token![;]) {
@@ -769,9 +799,17 @@ impl Parse for SyntaxTree {
                 if let Ok(ident) = Ident::parse_any(&fork) {
                     if ident.to_string() == "consume" {
                         Ident::parse_any(input)?; // consume
-                        let content;
-                        syn::parenthesized!(content in input);
-                        let consume_type: ConsumeType = content.parse()?;
+                        let consume_type: ConsumeType = if input.peek(syn::token::Paren) {
+                            let content;
+                            syn::parenthesized!(content in input);
+                            content.parse()?
+                        } else if input.peek(syn::Token![;]) {
+                            input.parse::<syn::Token![;]>()?;
+                            let expr: Expr = input.parse()?;
+                            ConsumeType::Expr(expr)
+                        } else {
+                            return Err(input.error("Expected `consume(expr)` or `consume; expr`"));
+                        };
                         inner.push(Row::Consume(consume_type));
                     } else {
                         let identifier = Ident::parse_any(input)?;
@@ -846,7 +884,6 @@ fn validate_unsized_vecs(rows: &[Row]) -> syn::Result<()> {
             Row::Consume(c) => {
                 if let Some(prev) = &unsized_vec_ident {
                     let span = match c {
-                        ConsumeType::Literal(lit) => lit.span(),
                         ConsumeType::Expr(expr) => expr.span(),
                     };
                     return Err(syn::Error::new(
@@ -867,7 +904,6 @@ fn validate_unsized_vecs(rows: &[Row]) -> syn::Result<()> {
                         Row::Consume(c) => {
                             if let Some(prev) = &unsized_vec_ident {
                                 let span = match c {
-                                    ConsumeType::Literal(lit) => lit.span(),
                                     ConsumeType::Expr(expr) => expr.span(),
                                 };
                                 return Err(syn::Error::new(
@@ -1062,6 +1098,7 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
     let mut enum_variants = Vec::new();
     let mut match_arms = Vec::new();
     let mut write_arms = Vec::new();
+    let mut from_arms = Vec::new();
     
     let write_val = match repr_type {
         Type::UInt(_) | Type::Int(_) | Type::USize => quote! { (core::clone::Clone::clone(v)) as #repr_type },
@@ -1076,44 +1113,52 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { #value => Ok(Self::#ident(core::default::Default::default())) });
-                    write_arms.push(quote! { Self::#ident(_) => #value });
+                    from_arms.push(quote! { #value => Self::#ident(core::default::Default::default()) });
+                    write_arms.push(quote! { #enum_name::#ident(_) => #value });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { #value => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => #value });
+                    from_arms.push(quote! { #value => Self::#ident });
+                    write_arms.push(quote! { #enum_name::#ident => #value });
                 }
             }
             VariantMatch::Assignment(expr, cond) => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { _ if #cond => Ok(Self::#ident(#expr)) });
-                    write_arms.push(quote! { Self::#ident(_) => core::default::Default::default() }); // Fallback on serialize
+                    from_arms.push(quote! { _ if #cond => Self::#ident(#expr) });
+                    write_arms.push(quote! { #enum_name::#ident(_) => core::default::Default::default() }); // Fallback on serialize
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { _ if #cond => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => core::default::Default::default() });
+                    from_arms.push(quote! { _ if #cond => Self::#ident });
+                    write_arms.push(quote! { #enum_name::#ident => core::default::Default::default() });
                 }
             }
             VariantMatch::Condition(cond) => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident(v as #inner)) });
-                    write_arms.push(quote! { Self::#ident(v) => #write_val });
+                    from_arms.push(quote! { v if v #cond => Self::#ident(v as #inner) });
+                    write_arms.push(quote! { #enum_name::#ident(v) => #write_val });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { v if v #cond => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => core::default::Default::default() });
+                    from_arms.push(quote! { v if v #cond => Self::#ident });
+                    write_arms.push(quote! { #enum_name::#ident => core::default::Default::default() });
                 }
             }
             VariantMatch::CatchAll => {
                 if let Some(inner) = &variant.inner_type {
                     enum_variants.push(quote! { #ident(#inner) });
                     match_arms.push(quote! { v => Ok(Self::#ident(v as #inner)) });
-                    write_arms.push(quote! { Self::#ident(v) => #write_val });
+                    from_arms.push(quote! { v => Self::#ident(v as #inner) });
+                    write_arms.push(quote! { #enum_name::#ident(v) => #write_val });
                 } else {
                     enum_variants.push(quote! { #ident });
                     match_arms.push(quote! { _ => Ok(Self::#ident) });
-                    write_arms.push(quote! { Self::#ident => core::default::Default::default() });
+                    from_arms.push(quote! { _ => Self::#ident });
+                    write_arms.push(quote! { #enum_name::#ident => core::default::Default::default() });
                 }
             }
         }
@@ -1126,6 +1171,32 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
     let write_tag_value = repr_type.generate_write_code(&quote!(tag_value));
 
     let attrs = &parsed.attrs;
+    
+    let (from_repr_impl, into_repr_impl) = if matches!(repr_type, Type::Vec(_)) {
+        (quote! {}, quote! {})
+    } else {
+        (
+            quote! {
+                impl core::convert::From<#repr_type> for #enum_name {
+                    fn from(tag_value: #repr_type) -> Self {
+                        match tag_value {
+                            #(#from_arms,)*
+                            _ => panic!("Invalid value for enum")
+                        }
+                    }
+                }
+            },
+            quote! {
+                impl core::convert::From<#enum_name> for #repr_type {
+                    fn from(value: #enum_name) -> Self {
+                        match &value {
+                            #(#write_arms),*
+                        }
+                    }
+                }
+            }
+        )
+    };
 
     let expanded = quote! {
         #(#attrs)*
@@ -1272,7 +1343,11 @@ pub fn make_enum(input: TokenStream) -> TokenStream {
                 buffer
             }
         }
+        
+        #from_repr_impl
+        #into_repr_impl
     };
+
     
     TokenStream::from(expanded)
 }

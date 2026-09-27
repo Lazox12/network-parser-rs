@@ -1,4 +1,4 @@
-use crate::*;
+use network_parser_rs::*;
 use alloc::vec::Vec;
 
 make_struct!{ ethII_frame{
