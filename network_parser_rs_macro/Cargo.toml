@@ -1,6 +1,6 @@
 [package]
 name = "network_parser_rs_macro"
-version = "0.0.1"
+version = "1.2.1"
 edition = "2024"
 license = "MIT"
 description = "a procedural macro for network_parser_rs package"

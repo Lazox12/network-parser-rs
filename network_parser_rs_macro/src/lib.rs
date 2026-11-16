@@ -359,10 +359,8 @@ impl SyntaxTree {
                         *bit_offset += bits;
                     };
 
-                    #[allow(unused_variables)]
-
-
                     #(
+                        #[allow(unused_variables)]
                         let #struct_fields = self.#struct_fields.clone();
                     )*
 

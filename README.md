@@ -42,9 +42,11 @@ You can define unsigned and signed integer fields using `uX` or `iX` where `X` r
 * Example: `field: i12` (12-bit signed integer)
 
 ### 2. Skipping / Consuming Data
-If there is padding or reserved bits/bytes in the stream that you need to ignore, use `consume(expr)`.
-* `consume(5)`: Skips a literal amount of bits.
-* `consume(my_func())`: Skips an amount of bits determined by a dynamic expression.
+If there is padding or reserved bits/bytes in the stream that you need to ignore, use `consume(expr)` or the alternative `consume; expr` syntax.
+* **Length is in bits**: The argument to `consume` is ALWAYS in **bits**, not bytes! If you want to consume bytes, multiply by 8 (e.g., `consume(2 * 8)` to consume 2 bytes).
+* **Serialization behavior**: When parsing, `consume` skips the specified number of bits. When serializing (writing back to the wire), it explicitly writes zeroed bits for the skipped length.
+* `consume(5)`: Skips 5 bits.
+* `consume(16 - my_field)`: Skips an amount of bits determined by a dynamic expression (e.g., based on previously parsed fields).
 * **Conditionally skipping**: You can place `consume()` directives inside `if` blocks to skip bits only if a certain condition is met.
 
 ### 3. Dynamic Collections (`Vec`)
